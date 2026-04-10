@@ -13,13 +13,15 @@ const TOKEN = process.env.TOKEN;
 const CHANNEL_ID = "1480284500494647538";
 const TIME_ZONE = "America/Toronto";
 const PORT = process.env.PORT || 3000;
+
+// Keep alert messages around; set to 0 to never delete them.
 const ALERT_DELETE_MS = 60 * 1000;
 
 // --------------------
 // KEEP ALIVE
 // --------------------
-app.get("/", (req, res) => {
-  res.send("Bot is alive!");
+app.get("/", (_req, res) => {
+  res.send("CW Timer bot is alive!");
 });
 
 app.listen(PORT, () => {
@@ -41,7 +43,7 @@ let crimsonMessageId = null;
 let dragonMessageId = null;
 
 // --------------------
-// TIMEZONE-SAFE HELPERS
+// TIMEZONE HELPERS
 // --------------------
 function getZonedParts(date = new Date(), timeZone = TIME_ZONE) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
@@ -139,18 +141,6 @@ function toUnix(date) {
 
 function formatDuration(hours) {
   return hours === 1 ? "1 hour" : `${hours} hours`;
-}
-
-function formatTorontoLabel(date) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: TIME_ZONE,
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true
-  }).format(date);
 }
 
 // --------------------
@@ -332,7 +322,7 @@ function createEventEmbed({
 }
 
 // --------------------
-// DISCORD MESSAGE HELPER
+// MESSAGE HELPER
 // --------------------
 async function postOrUpdate(messageId, payload) {
   const channel = await client.channels.fetch(CHANNEL_ID);
@@ -356,10 +346,7 @@ async function postOrUpdate(messageId, payload) {
   }
 }
 
-// --------------------
-// ALERT HELPER
-// --------------------
-async function sendTemporaryAlert(content) {
+async function sendTemporaryAlert(content, embeds = []) {
   const channel = await client.channels.fetch(CHANNEL_ID);
 
   if (!channel) {
@@ -368,16 +355,19 @@ async function sendTemporaryAlert(content) {
 
   const msg = await channel.send({
     content,
+    embeds,
     allowedMentions: { parse: ["everyone"] }
   });
 
-  setTimeout(async () => {
-    try {
-      await msg.delete();
-    } catch (err) {
-      console.error("Failed to delete alert message:", err);
-    }
-  }, ALERT_DELETE_MS);
+  if (ALERT_DELETE_MS > 0) {
+    setTimeout(async () => {
+      try {
+        await msg.delete();
+      } catch (err) {
+        console.error("Failed to delete alert message:", err);
+      }
+    }, ALERT_DELETE_MS);
+  }
 }
 
 // --------------------
@@ -421,7 +411,10 @@ async function updateCrimson() {
 
 async function startCrimsonEvent() {
   await updateCrimson();
-  await sendTemporaryAlert("@everyone 🌕 **Crimson Moon is LIVE!!**");
+  await sendTemporaryAlert(
+    "@everyone 🌕 **Crimson Moon is LIVE!!**",
+    buildCrimsonPayload().embeds
+  );
 }
 
 async function endCrimsonEvent() {
@@ -469,7 +462,10 @@ async function updateDragon() {
 
 async function startDragonEvent() {
   await updateDragon();
-  await sendTemporaryAlert("@everyone 🐉🕷️ **Dragon/Spider is now OPEN!!**");
+  await sendTemporaryAlert(
+    "@everyone 🐉🕷️ **Dragon/Spider is now OPEN!!**",
+    buildDragonPayload().embeds
+  );
 }
 
 async function endDragonEvent() {
@@ -520,6 +516,7 @@ client.once("ready", async () => {
     console.error("Initial posting failed:", err);
   }
 
+  // Crimson Moon
   cron.schedule("0 1 * * *", async () => {
     try {
       await startCrimsonEvent();
@@ -568,6 +565,7 @@ client.once("ready", async () => {
     }
   }, { timezone: TIME_ZONE });
 
+  // Dragon / Spider
   cron.schedule("0 4 * * *", async () => {
     try {
       await startDragonEvent();
@@ -626,8 +624,12 @@ client.on("messageCreate", async (message) => {
   const cmd = message.content.toLowerCase().trim();
 
   if (cmd === "!pingall") {
+    const crimsonEmbed = buildCrimsonPayload().embeds[0];
+    const dragonEmbed = buildDragonPayload().embeds[0];
+
     await message.channel.send({
-      content: "@everyone 🚨 Manual alert!",
+      content: "@everyone 🚨 **Event update!**",
+      embeds: [crimsonEmbed, dragonEmbed],
       allowedMentions: { parse: ["everyone"] }
     });
     return;
@@ -637,7 +639,7 @@ client.on("messageCreate", async (message) => {
     try {
       await updateCrimson();
       await updateDragon();
-      await message.reply("✅ Refreshed");
+      await message.reply("✅ Timers refreshed.");
     } catch (err) {
       console.error("Manual refresh failed:", err);
       await message.reply("⚠️ Refresh failed.");
@@ -654,6 +656,7 @@ client.on("messageCreate", async (message) => {
     }
 
     const unix = toUnix(nextEvent.time);
+
     await message.reply(
       `⏳ **Next Event: ${nextEvent.name}**\n${nextEvent.label}: <t:${unix}:R> | <t:${unix}:F>\nServer timezone: ${TIME_ZONE}`
     );
