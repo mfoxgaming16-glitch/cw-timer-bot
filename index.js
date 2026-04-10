@@ -23,7 +23,7 @@ app.get("/", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("Keep-alive server running");
+  console.log(`Keep-alive server running on port ${PORT}`);
 });
 
 // --------------------
@@ -41,205 +41,580 @@ let crimsonMessageId = null;
 let dragonMessageId = null;
 
 // --------------------
-// TIME HELPERS
+// TIMEZONE-SAFE HELPERS
 // --------------------
+function getZonedParts(date = new Date(), timeZone = TIME_ZONE) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  });
+
+  const parts = formatter.formatToParts(date);
+  const out = {};
+
+  for (const part of parts) {
+    if (part.type !== "literal") {
+      out[part.type] = Number(part.value);
+    }
+  }
+
+  return {
+    year: out.year,
+    month: out.month,
+    day: out.day,
+    hour: out.hour,
+    minute: out.minute,
+    second: out.second
+  };
+}
+
+function addDaysToYMD(year, month, day, daysToAdd) {
+  const d = new Date(Date.UTC(year, month - 1, day));
+  d.setUTCDate(d.getUTCDate() + daysToAdd);
+
+  return {
+    year: d.getUTCFullYear(),
+    month: d.getUTCMonth() + 1,
+    day: d.getUTCDate()
+  };
+}
+
+function makeZonedDate(
+  year,
+  month,
+  day,
+  hour = 0,
+  minute = 0,
+  second = 0,
+  timeZone = TIME_ZONE
+) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  });
+
+  let guess = Date.UTC(year, month - 1, day, hour, minute, second);
+
+  for (let i = 0; i < 4; i++) {
+    const parts = formatter.formatToParts(new Date(guess));
+    const current = {};
+
+    for (const part of parts) {
+      if (part.type !== "literal") {
+        current[part.type] = Number(part.value);
+      }
+    }
+
+    const renderedAsUTC = Date.UTC(
+      current.year,
+      current.month - 1,
+      current.day,
+      current.hour,
+      current.minute,
+      current.second
+    );
+
+    const targetAsUTC = Date.UTC(year, month - 1, day, hour, minute, second);
+    guess += targetAsUTC - renderedAsUTC;
+  }
+
+  return new Date(guess);
+}
+
 function toUnix(date) {
   return Math.floor(date.getTime() / 1000);
 }
 
-// Proper timezone-safe event logic
-function getEvent(hours, duration) {
+function formatDuration(hours) {
+  return hours === 1 ? "1 hour" : `${hours} hours`;
+}
+
+function formatTorontoLabel(date) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  }).format(date);
+}
+
+// --------------------
+// EVENT WINDOW LOGIC
+// --------------------
+function buildWindows(hours, durationHours) {
   const now = new Date();
+  const torontoToday = getZonedParts(now, TIME_ZONE);
+  const windows = [];
 
-  let best = null;
+  for (let dayOffset = -1; dayOffset <= 2; dayOffset++) {
+    const ymd = addDaysToYMD(
+      torontoToday.year,
+      torontoToday.month,
+      torontoToday.day,
+      dayOffset
+    );
 
-  for (let d = -1; d <= 2; d++) {
-    for (let h of hours) {
-      let start = new Date(now);
-      start.setUTCDate(start.getUTCDate() + d);
-      start.setUTCHours(h, 0, 0, 0);
+    for (const hour of hours) {
+      const start = makeZonedDate(
+        ymd.year,
+        ymd.month,
+        ymd.day,
+        hour,
+        0,
+        0,
+        TIME_ZONE
+      );
 
-      let end = new Date(start.getTime() + duration * 3600000);
-
-      if (now >= start && now < end) {
-        return { active: true, start, end };
-      }
-
-      if (!best || start < best.start) {
-        if (start > now) {
-          best = { active: false, start, end };
-        }
-      }
+      const end = new Date(start.getTime() + durationHours * 60 * 60 * 1000);
+      windows.push({ start, end });
     }
   }
 
-  return best;
+  windows.sort((a, b) => a.start - b.start);
+  return windows;
+}
+
+function getEventStatus(hours, durationHours) {
+  const now = new Date();
+  const windows = buildWindows(hours, durationHours);
+
+  for (const window of windows) {
+    if (now >= window.start && now < window.end) {
+      return {
+        isActive: true,
+        start: window.start,
+        end: window.end
+      };
+    }
+  }
+
+  for (const window of windows) {
+    if (window.start > now) {
+      return {
+        isActive: false,
+        start: window.start,
+        end: window.end
+      };
+    }
+  }
+
+  return null;
 }
 
 // --------------------
-// EMBED BUILDER
+// EMBED HELPERS
 // --------------------
-function buildEmbed(title, emoji, e, schedule, duration, hype) {
-  if (!e) {
+function progressBar(start, end, length = 12) {
+  const now = Date.now();
+  const total = end.getTime() - start.getTime();
+  const elapsed = Math.max(0, Math.min(now - start.getTime(), total));
+  const filled = total > 0 ? Math.round((elapsed / total) * length) : 0;
+
+  return "🟩".repeat(filled) + "⬜".repeat(length - filled);
+}
+
+function createEventEmbed({
+  title,
+  liveTitle,
+  activeEmoji,
+  inactiveEmoji,
+  activeColor,
+  inactiveColor,
+  scheduleText,
+  durationHours,
+  status,
+  hypeLine,
+  openLabel,
+  closeLabel
+}) {
+  if (!status) {
     return new EmbedBuilder()
       .setTitle(title)
+      .setDescription("⚠️ Could not calculate the next event window.")
       .setColor(Colors.Red)
-      .setDescription("Error loading event");
+      .setFooter({ text: `Server timezone: ${TIME_ZONE}` })
+      .setTimestamp();
   }
 
-  if (e.active) {
+  if (status.isActive) {
     return new EmbedBuilder()
-      .setTitle(`${emoji} ${title} LIVE`)
-      .setColor(Colors.Green)
-      .setDescription(hype)
+      .setTitle(`${activeEmoji} ${liveTitle}`)
+      .setDescription(hypeLine)
+      .setColor(activeColor)
       .addFields(
         {
-          name: "Ends",
-          value: `<t:${toUnix(e.end)}:R>\n<t:${toUnix(e.end)}:F>`
+          name: "Status",
+          value: "🟢 **LIVE NOW**",
+          inline: true
         },
         {
-          name: "Schedule",
-          value: schedule
+          name: closeLabel,
+          value: `<t:${toUnix(status.end)}:R>\n<t:${toUnix(status.end)}:F>`,
+          inline: true
+        },
+        {
+          name: "Progress",
+          value: progressBar(status.start, status.end),
+          inline: false
+        },
+        {
+          name: "Server Schedule (Toronto)",
+          value: scheduleText,
+          inline: false
         },
         {
           name: "Duration",
-          value: duration
+          value: formatDuration(durationHours),
+          inline: true
+        },
+        {
+          name: "Server Timezone",
+          value: TIME_ZONE,
+          inline: true
         }
-      );
+      )
+      .setFooter({ text: "Discord timestamps auto-convert for each viewer." })
+      .setTimestamp();
   }
 
   return new EmbedBuilder()
-    .setTitle(`${emoji} ${title}`)
-    .setColor(Colors.Blue)
+    .setTitle(`${inactiveEmoji} ${title}`)
+    .setColor(inactiveColor)
     .addFields(
       {
-        name: "Starts",
-        value: `<t:${toUnix(e.start)}:R>\n<t:${toUnix(e.start)}:F>`
+        name: "Status",
+        value: "🕒 **Upcoming**",
+        inline: true
       },
       {
-        name: "Ends",
-        value: `<t:${toUnix(e.end)}:F>`
+        name: openLabel,
+        value: `<t:${toUnix(status.start)}:R>\n<t:${toUnix(status.start)}:F>`,
+        inline: true
       },
       {
-        name: "Schedule",
-        value: schedule
+        name: closeLabel,
+        value: `<t:${toUnix(status.end)}:F>`,
+        inline: true
+      },
+      {
+        name: "Server Schedule (Toronto)",
+        value: scheduleText,
+        inline: false
       },
       {
         name: "Duration",
-        value: duration
+        value: formatDuration(durationHours),
+        inline: true
+      },
+      {
+        name: "Server Timezone",
+        value: TIME_ZONE,
+        inline: true
       }
-    );
+    )
+    .setFooter({ text: "Discord timestamps auto-convert for each viewer." })
+    .setTimestamp();
 }
 
 // --------------------
-// SEND / EDIT MESSAGE
+// DISCORD MESSAGE HELPER
 // --------------------
-async function sendOrEdit(id, payload) {
+async function postOrUpdate(messageId, payload) {
   const channel = await client.channels.fetch(CHANNEL_ID);
 
-  if (!id) {
+  if (!channel) {
+    throw new Error("Channel not found. Check CHANNEL_ID.");
+  }
+
+  if (!messageId) {
     const msg = await channel.send(payload);
     return msg.id;
   }
 
   try {
-    const msg = await channel.messages.fetch(id);
+    const msg = await channel.messages.fetch(messageId);
     await msg.edit(payload);
-    return id;
+    return messageId;
   } catch {
-    const msg = await channel.send(payload);
-    return msg.id;
+    const newMsg = await channel.send(payload);
+    return newMsg.id;
   }
 }
 
 // --------------------
-// ALERT MESSAGE
+// ALERT HELPER
 // --------------------
-async function alert(msg) {
+async function sendTemporaryAlert(content) {
   const channel = await client.channels.fetch(CHANNEL_ID);
 
-  const sent = await channel.send({
-    content: `@everyone ${msg}`,
+  if (!channel) {
+    throw new Error("Channel not found. Check CHANNEL_ID.");
+  }
+
+  const msg = await channel.send({
+    content,
     allowedMentions: { parse: ["everyone"] }
   });
 
-  setTimeout(() => sent.delete().catch(() => {}), ALERT_DELETE_MS);
+  setTimeout(async () => {
+    try {
+      await msg.delete();
+    } catch (err) {
+      console.error("Failed to delete alert message:", err);
+    }
+  }, ALERT_DELETE_MS);
 }
 
 // --------------------
 // CRIMSON MOON
 // --------------------
 const CRIMSON_HOURS = [1, 9, 17];
+const CRIMSON_DURATION_HOURS = 1;
 
-async function updateCrimson() {
-  const e = getEvent(CRIMSON_HOURS, 1);
-
-  const embed = buildEmbed(
-    "Crimson Moon",
-    "🌕",
-    e,
-    "1AM / 9AM / 5PM",
-    "1 hour",
-    "🔥 Get in now!"
-  );
-
-  crimsonMessageId = await sendOrEdit(crimsonMessageId, { embeds: [embed] });
+function getCrimsonStatus() {
+  return getEventStatus(CRIMSON_HOURS, CRIMSON_DURATION_HOURS);
 }
 
-async function startCrimson() {
+function buildCrimsonPayload() {
+  const status = getCrimsonStatus();
+
+  const embed = createEventEmbed({
+    title: "Crimson Moon",
+    liveTitle: "Crimson Moon is LIVE!!",
+    activeEmoji: "🌕",
+    inactiveEmoji: "🌙",
+    activeColor: Colors.Gold,
+    inactiveColor: Colors.DarkGold,
+    scheduleText: "🌑 1:00 AM\n🕘 9:00 AM\n🕔 5:00 PM",
+    durationHours: CRIMSON_DURATION_HOURS,
+    status,
+    hypeLine: "🔥 The moon is shining — get in now!",
+    openLabel: "Starts",
+    closeLabel: "Ends"
+  });
+
+  return {
+    content: "",
+    embeds: [embed],
+    allowedMentions: { parse: [] }
+  };
+}
+
+async function updateCrimson() {
+  crimsonMessageId = await postOrUpdate(crimsonMessageId, buildCrimsonPayload());
+}
+
+async function startCrimsonEvent() {
   await updateCrimson();
-  await alert("🌕 Crimson Moon is LIVE!");
+  await sendTemporaryAlert("@everyone 🌕 **Crimson Moon is LIVE!!**");
+}
+
+async function endCrimsonEvent() {
+  await updateCrimson();
 }
 
 // --------------------
 // DRAGON / SPIDER
 // --------------------
 const DRAGON_HOURS = [4, 12, 20];
+const DRAGON_DURATION_HOURS = 2;
 
-async function updateDragon() {
-  const e = getEvent(DRAGON_HOURS, 2);
-
-  const embed = buildEmbed(
-    "Dragon / Spider",
-    "🐉",
-    e,
-    "4AM / 12PM / 8PM",
-    "2 hours",
-    "🔥 Go now!"
-  );
-
-  dragonMessageId = await sendOrEdit(dragonMessageId, { embeds: [embed] });
+function getDragonStatus() {
+  return getEventStatus(DRAGON_HOURS, DRAGON_DURATION_HOURS);
 }
 
-async function startDragon() {
+function buildDragonPayload() {
+  const status = getDragonStatus();
+
+  const embed = createEventEmbed({
+    title: "Dragon/Spider",
+    liveTitle: "Dragon/Spider is OPEN!!",
+    activeEmoji: "🐉",
+    inactiveEmoji: "🕷️",
+    activeColor: Colors.Green,
+    inactiveColor: Colors.DarkGreen,
+    scheduleText: "🕓 4:00 AM\n🕛 12:00 PM\n🕗 8:00 PM",
+    durationHours: DRAGON_DURATION_HOURS,
+    status,
+    hypeLine: "🔥 Head to Dragon/Spider now!",
+    openLabel: "Opens",
+    closeLabel: "Closes"
+  });
+
+  return {
+    content: "",
+    embeds: [embed],
+    allowedMentions: { parse: [] }
+  };
+}
+
+async function updateDragon() {
+  dragonMessageId = await postOrUpdate(dragonMessageId, buildDragonPayload());
+}
+
+async function startDragonEvent() {
   await updateDragon();
-  await alert("🐉 Dragon/Spider is OPEN!");
+  await sendTemporaryAlert("@everyone 🐉🕷️ **Dragon/Spider is now OPEN!!**");
+}
+
+async function endDragonEvent() {
+  await updateDragon();
 }
 
 // --------------------
-// READY
+// NEXT EVENT HELPER
+// --------------------
+function getNextUpcomingEvent() {
+  const crimson = getCrimsonStatus();
+  const dragon = getDragonStatus();
+  const candidates = [];
+
+  if (crimson) {
+    candidates.push({
+      name: crimson.isActive ? "Crimson Moon 🌕" : "Crimson Moon 🌙",
+      time: crimson.isActive ? crimson.end : crimson.start,
+      label: crimson.isActive ? "ends" : "starts"
+    });
+  }
+
+  if (dragon) {
+    candidates.push({
+      name: "Dragon/Spider 🐉🕷️",
+      time: dragon.isActive ? dragon.end : dragon.start,
+      label: dragon.isActive ? "ends" : "starts"
+    });
+  }
+
+  if (candidates.length === 0) return null;
+
+  candidates.sort((a, b) => a.time - b.time);
+  return candidates[0];
+}
+
+// --------------------
+// STARTUP
 // --------------------
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  await updateCrimson();
-  await updateDragon();
+  try {
+    await updateCrimson();
+    await updateDragon();
+    console.log("Timers posted successfully.");
+  } catch (err) {
+    console.error("Initial posting failed:", err);
+  }
 
-  cron.schedule("0 1 * * *", startCrimson, { timezone: TIME_ZONE });
-  cron.schedule("0 9 * * *", startCrimson, { timezone: TIME_ZONE });
-  cron.schedule("0 17 * * *", startCrimson, { timezone: TIME_ZONE });
+  cron.schedule("0 1 * * *", async () => {
+    try {
+      await startCrimsonEvent();
+    } catch (err) {
+      console.error("Crimson 1 AM update failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
 
-  cron.schedule("0 2 * * *", updateCrimson, { timezone: TIME_ZONE });
-  cron.schedule("0 10 * * *", updateCrimson, { timezone: TIME_ZONE });
-  cron.schedule("0 18 * * *", updateCrimson, { timezone: TIME_ZONE });
+  cron.schedule("0 9 * * *", async () => {
+    try {
+      await startCrimsonEvent();
+    } catch (err) {
+      console.error("Crimson 9 AM update failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
 
-  cron.schedule("0 4 * * *", startDragon, { timezone: TIME_ZONE });
-  cron.schedule("0 12 * * *", startDragon, { timezone: TIME_ZONE });
-  cron.schedule("0 20 * * *", startDragon, { timezone: TIME_ZONE });
+  cron.schedule("0 17 * * *", async () => {
+    try {
+      await startCrimsonEvent();
+    } catch (err) {
+      console.error("Crimson 5 PM update failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
 
-  cron.schedule("0 6 * * *", updateDragon, { timezone: TIME_ZONE });
-  cron.schedule("0 14 * * *", updateDragon, { timezone: TIME_ZONE });
-  cron.schedule("0 22 * * *", updateDragon, { timezone: TIME_ZONE });
+  cron.schedule("0 2 * * *", async () => {
+    try {
+      await endCrimsonEvent();
+    } catch (err) {
+      console.error("Crimson 2 AM refresh failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
+
+  cron.schedule("0 10 * * *", async () => {
+    try {
+      await endCrimsonEvent();
+    } catch (err) {
+      console.error("Crimson 10 AM refresh failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
+
+  cron.schedule("0 18 * * *", async () => {
+    try {
+      await endCrimsonEvent();
+    } catch (err) {
+      console.error("Crimson 6 PM refresh failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
+
+  cron.schedule("0 4 * * *", async () => {
+    try {
+      await startDragonEvent();
+    } catch (err) {
+      console.error("Dragon 4 AM update failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
+
+  cron.schedule("0 12 * * *", async () => {
+    try {
+      await startDragonEvent();
+    } catch (err) {
+      console.error("Dragon 12 PM update failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
+
+  cron.schedule("0 20 * * *", async () => {
+    try {
+      await startDragonEvent();
+    } catch (err) {
+      console.error("Dragon 8 PM update failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
+
+  cron.schedule("0 6 * * *", async () => {
+    try {
+      await endDragonEvent();
+    } catch (err) {
+      console.error("Dragon 6 AM refresh failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
+
+  cron.schedule("0 14 * * *", async () => {
+    try {
+      await endDragonEvent();
+    } catch (err) {
+      console.error("Dragon 2 PM refresh failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
+
+  cron.schedule("0 22 * * *", async () => {
+    try {
+      await endDragonEvent();
+    } catch (err) {
+      console.error("Dragon 10 PM refresh failed:", err);
+    }
+  }, { timezone: TIME_ZONE });
 });
 
 // --------------------
@@ -250,7 +625,6 @@ client.on("messageCreate", async (message) => {
 
   const cmd = message.content.toLowerCase().trim();
 
-  // 🔥 PING COMMAND
   if (cmd === "!pingall") {
     await message.channel.send({
       content: "@everyone 🚨 Manual alert!",
@@ -259,12 +633,30 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // 🔄 REFRESH
   if (cmd === "!refresh") {
-    await updateCrimson();
-    await updateDragon();
-    await message.reply("✅ Refreshed");
+    try {
+      await updateCrimson();
+      await updateDragon();
+      await message.reply("✅ Refreshed");
+    } catch (err) {
+      console.error("Manual refresh failed:", err);
+      await message.reply("⚠️ Refresh failed.");
+    }
     return;
+  }
+
+  if (cmd === "!next") {
+    const nextEvent = getNextUpcomingEvent();
+
+    if (!nextEvent) {
+      await message.reply("⚠️ Could not determine the next event.");
+      return;
+    }
+
+    const unix = toUnix(nextEvent.time);
+    await message.reply(
+      `⏳ **Next Event: ${nextEvent.name}**\n${nextEvent.label}: <t:${unix}:R> | <t:${unix}:F>\nServer timezone: ${TIME_ZONE}`
+    );
   }
 });
 
