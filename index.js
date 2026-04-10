@@ -3,7 +3,7 @@ const {
   Client,
   GatewayIntentBits,
   EmbedBuilder,
-  Colors
+  Colors,
 } = require("discord.js");
 const cron = require("node-cron");
 
@@ -13,14 +13,12 @@ const TOKEN = process.env.TOKEN;
 const CHANNEL_ID = "1480284500494647538";
 const TIME_ZONE = "America/Toronto";
 const PORT = process.env.PORT || 3000;
-
-// Keep alert messages around; set to 0 to never delete them.
 const ALERT_DELETE_MS = 60 * 1000;
 
 // --------------------
-// KEEP ALIVE
+// KEEP-ALIVE SERVER
 // --------------------
-app.get("/", (_req, res) => {
+app.get("/", (req, res) => {
   res.send("CW Timer bot is alive!");
 });
 
@@ -29,18 +27,65 @@ app.listen(PORT, () => {
 });
 
 // --------------------
-// DISCORD CLIENT
+// DISCORD BOT
 // --------------------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
-let crimsonMessageId = null;
-let dragonMessageId = null;
+// --------------------
+// IN-MEMORY STATE
+// --------------------
+const state = {
+  crimsonMessageId: null,
+  dragonMessageId: null,
+  crimsonLastRenderKey: null,
+  dragonLastRenderKey: null,
+  crimsonLastAlertKey: null,
+  dragonLastAlertKey: null,
+};
+
+// --------------------
+// EVENT CONFIG
+// --------------------
+const EVENTS = {
+  crimson: {
+    key: "crimson",
+    title: "Crimson Moon",
+    liveTitle: "Crimson Moon is LIVE!!",
+    activeEmoji: "🌕",
+    inactiveEmoji: "🌙",
+    activeColor: Colors.Gold,
+    inactiveColor: Colors.DarkGold,
+    hours: [1, 9, 17],
+    durationHours: 1,
+    scheduleText: "🌑 1:00 AM\n🕘 9:00 AM\n🕔 5:00 PM",
+    openLabel: "Starts",
+    closeLabel: "Ends",
+    liveLine: "🔥 The moon is shining — get in now!",
+    alertText: "@everyone 🌕 **Crimson Moon is LIVE!!**",
+  },
+  dragon: {
+    key: "dragon",
+    title: "Dragon/Spider",
+    liveTitle: "Dragon/Spider is OPEN!!",
+    activeEmoji: "🐉",
+    inactiveEmoji: "🕷️",
+    activeColor: Colors.Green,
+    inactiveColor: Colors.DarkGreen,
+    hours: [4, 12, 20],
+    durationHours: 2,
+    scheduleText: "🕓 4:00 AM\n🕛 12:00 PM\n🕗 8:00 PM",
+    openLabel: "Opens",
+    closeLabel: "Closes",
+    liveLine: "🔥 Head to Dragon/Spider now!",
+    alertText: "@everyone 🐉🕷️ **Dragon/Spider is now OPEN!!**",
+  },
+};
 
 // --------------------
 // TIMEZONE HELPERS
@@ -54,7 +99,7 @@ function getZonedParts(date = new Date(), timeZone = TIME_ZONE) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hourCycle: "h23"
+    hourCycle: "h23",
   });
 
   const parts = formatter.formatToParts(date);
@@ -72,7 +117,7 @@ function getZonedParts(date = new Date(), timeZone = TIME_ZONE) {
     day: out.day,
     hour: out.hour,
     minute: out.minute,
-    second: out.second
+    second: out.second,
   };
 }
 
@@ -83,7 +128,7 @@ function addDaysToYMD(year, month, day, daysToAdd) {
   return {
     year: d.getUTCFullYear(),
     month: d.getUTCMonth() + 1,
-    day: d.getUTCDate()
+    day: d.getUTCDate(),
   };
 }
 
@@ -104,7 +149,7 @@ function makeZonedDate(
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hourCycle: "h23"
+    hourCycle: "h23",
   });
 
   let guess = Date.UTC(year, month - 1, day, hour, minute, second);
@@ -137,6 +182,18 @@ function makeZonedDate(
 
 function toUnix(date) {
   return Math.floor(date.getTime() / 1000);
+}
+
+function formatTorontoLabel(date) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
 }
 
 function formatDuration(hours) {
@@ -188,7 +245,7 @@ function getEventStatus(hours, durationHours) {
       return {
         isActive: true,
         start: window.start,
-        end: window.end
+        end: window.end,
       };
     }
   }
@@ -198,12 +255,17 @@ function getEventStatus(hours, durationHours) {
       return {
         isActive: false,
         start: window.start,
-        end: window.end
+        end: window.end,
       };
     }
   }
 
   return null;
+}
+
+function getWindowKey(status) {
+  if (!status) return null;
+  return `${toUnix(status.start)}-${toUnix(status.end)}`;
 }
 
 // --------------------
@@ -218,23 +280,10 @@ function progressBar(start, end, length = 12) {
   return "🟩".repeat(filled) + "⬜".repeat(length - filled);
 }
 
-function createEventEmbed({
-  title,
-  liveTitle,
-  activeEmoji,
-  inactiveEmoji,
-  activeColor,
-  inactiveColor,
-  scheduleText,
-  durationHours,
-  status,
-  hypeLine,
-  openLabel,
-  closeLabel
-}) {
+function createEventEmbed(config, status) {
   if (!status) {
     return new EmbedBuilder()
-      .setTitle(title)
+      .setTitle(config.title)
       .setDescription("⚠️ Could not calculate the next event window.")
       .setColor(Colors.Red)
       .setFooter({ text: `Server timezone: ${TIME_ZONE}` })
@@ -243,39 +292,39 @@ function createEventEmbed({
 
   if (status.isActive) {
     return new EmbedBuilder()
-      .setTitle(`${activeEmoji} ${liveTitle}`)
-      .setDescription(hypeLine)
-      .setColor(activeColor)
+      .setTitle(`${config.activeEmoji} ${config.liveTitle}`)
+      .setDescription(config.liveLine)
+      .setColor(config.activeColor)
       .addFields(
         {
           name: "Status",
           value: "🟢 **LIVE NOW**",
-          inline: true
+          inline: true,
         },
         {
-          name: closeLabel,
+          name: config.closeLabel,
           value: `<t:${toUnix(status.end)}:R>\n<t:${toUnix(status.end)}:F>`,
-          inline: true
+          inline: true,
         },
         {
           name: "Progress",
           value: progressBar(status.start, status.end),
-          inline: false
+          inline: false,
         },
         {
           name: "Server Schedule (Toronto)",
-          value: scheduleText,
-          inline: false
+          value: config.scheduleText,
+          inline: false,
         },
         {
           name: "Duration",
-          value: formatDuration(durationHours),
-          inline: true
+          value: formatDuration(config.durationHours),
+          inline: true,
         },
         {
           name: "Server Timezone",
           value: TIME_ZONE,
-          inline: true
+          inline: true,
         }
       )
       .setFooter({ text: "Discord timestamps auto-convert for each viewer." })
@@ -283,53 +332,81 @@ function createEventEmbed({
   }
 
   return new EmbedBuilder()
-    .setTitle(`${inactiveEmoji} ${title}`)
-    .setColor(inactiveColor)
+    .setTitle(`${config.inactiveEmoji} ${config.title}`)
+    .setColor(config.inactiveColor)
     .addFields(
       {
         name: "Status",
         value: "🕒 **Upcoming**",
-        inline: true
+        inline: true,
       },
       {
-        name: openLabel,
+        name: config.openLabel,
         value: `<t:${toUnix(status.start)}:R>\n<t:${toUnix(status.start)}:F>`,
-        inline: true
+        inline: true,
       },
       {
-        name: closeLabel,
+        name: config.closeLabel,
         value: `<t:${toUnix(status.end)}:F>`,
-        inline: true
+        inline: true,
       },
       {
         name: "Server Schedule (Toronto)",
-        value: scheduleText,
-        inline: false
+        value: config.scheduleText,
+        inline: false,
       },
       {
         name: "Duration",
-        value: formatDuration(durationHours),
-        inline: true
+        value: formatDuration(config.durationHours),
+        inline: true,
       },
       {
         name: "Server Timezone",
         value: TIME_ZONE,
-        inline: true
+        inline: true,
       }
     )
     .setFooter({ text: "Discord timestamps auto-convert for each viewer." })
     .setTimestamp();
 }
 
-// --------------------
-// MESSAGE HELPER
-// --------------------
-async function postOrUpdate(messageId, payload) {
-  const channel = await client.channels.fetch(CHANNEL_ID);
+function buildEventPayload(config) {
+  const status = getEventStatus(config.hours, config.durationHours);
+  const embed = createEventEmbed(config, status);
 
+  return {
+    status,
+    payload: {
+      content: "",
+      embeds: [embed],
+      allowedMentions: { parse: [] },
+    },
+  };
+}
+
+function buildRenderKey(config, status) {
+  if (!status) return `${config.key}:none`;
+
+  return JSON.stringify({
+    active: status.isActive,
+    start: toUnix(status.start),
+    end: toUnix(status.end),
+  });
+}
+
+// --------------------
+// DISCORD HELPERS
+// --------------------
+async function getChannel() {
+  const channel = await client.channels.fetch(CHANNEL_ID);
   if (!channel) {
     throw new Error("Channel not found. Check CHANNEL_ID.");
   }
+  return channel;
+}
+
+async function postOrUpdate(messageId, payload) {
+  const channel = await getChannel();
 
   if (!messageId) {
     const msg = await channel.send(payload);
@@ -346,145 +423,85 @@ async function postOrUpdate(messageId, payload) {
   }
 }
 
-async function sendTemporaryAlert(content, embeds = []) {
-  const channel = await client.channels.fetch(CHANNEL_ID);
-
-  if (!channel) {
-    throw new Error("Channel not found. Check CHANNEL_ID.");
-  }
+async function sendTemporaryAlert(content) {
+  const channel = await getChannel();
 
   const msg = await channel.send({
     content,
-    embeds,
-    allowedMentions: { parse: ["everyone"] }
+    allowedMentions: { parse: ["everyone"] },
   });
 
-  if (ALERT_DELETE_MS > 0) {
-    setTimeout(async () => {
-      try {
-        await msg.delete();
-      } catch (err) {
-        console.error("Failed to delete alert message:", err);
-      }
-    }, ALERT_DELETE_MS);
+  setTimeout(async () => {
+    try {
+      await msg.delete();
+    } catch (err) {
+      console.error("Failed to delete alert message:", err);
+    }
+  }, ALERT_DELETE_MS);
+}
+
+// --------------------
+// SYNC LOGIC
+// --------------------
+async function syncCrimson(force = false) {
+  const config = EVENTS.crimson;
+  const { status, payload } = buildEventPayload(config);
+  const renderKey = buildRenderKey(config, status);
+  const windowKey = getWindowKey(status);
+
+  if (force || state.crimsonLastRenderKey !== renderKey) {
+    state.crimsonMessageId = await postOrUpdate(state.crimsonMessageId, payload);
+    state.crimsonLastRenderKey = renderKey;
+  }
+
+  if (status && status.isActive && windowKey && state.crimsonLastAlertKey !== windowKey) {
+    await sendTemporaryAlert(config.alertText);
+    state.crimsonLastAlertKey = windowKey;
   }
 }
 
-// --------------------
-// CRIMSON MOON
-// --------------------
-const CRIMSON_HOURS = [1, 9, 17];
-const CRIMSON_DURATION_HOURS = 1;
+async function syncDragon(force = false) {
+  const config = EVENTS.dragon;
+  const { status, payload } = buildEventPayload(config);
+  const renderKey = buildRenderKey(config, status);
+  const windowKey = getWindowKey(status);
 
-function getCrimsonStatus() {
-  return getEventStatus(CRIMSON_HOURS, CRIMSON_DURATION_HOURS);
+  if (force || state.dragonLastRenderKey !== renderKey) {
+    state.dragonMessageId = await postOrUpdate(state.dragonMessageId, payload);
+    state.dragonLastRenderKey = renderKey;
+  }
+
+  if (status && status.isActive && windowKey && state.dragonLastAlertKey !== windowKey) {
+    await sendTemporaryAlert(config.alertText);
+    state.dragonLastAlertKey = windowKey;
+  }
 }
 
-function buildCrimsonPayload() {
-  const status = getCrimsonStatus();
-
-  const embed = createEventEmbed({
-    title: "Crimson Moon",
-    liveTitle: "Crimson Moon is LIVE!!",
-    activeEmoji: "🌕",
-    inactiveEmoji: "🌙",
-    activeColor: Colors.Gold,
-    inactiveColor: Colors.DarkGold,
-    scheduleText: "🌑 1:00 AM\n🕘 9:00 AM\n🕔 5:00 PM",
-    durationHours: CRIMSON_DURATION_HOURS,
-    status,
-    hypeLine: "🔥 The moon is shining — get in now!",
-    openLabel: "Starts",
-    closeLabel: "Ends"
-  });
-
-  return {
-    content: "",
-    embeds: [embed],
-    allowedMentions: { parse: [] }
-  };
-}
-
-async function updateCrimson() {
-  crimsonMessageId = await postOrUpdate(crimsonMessageId, buildCrimsonPayload());
-}
-
-async function startCrimsonEvent() {
-  await updateCrimson();
-  await sendTemporaryAlert(
-    "@everyone 🌕 **Crimson Moon is LIVE!!**",
-    buildCrimsonPayload().embeds
-  );
-}
-
-async function endCrimsonEvent() {
-  await updateCrimson();
-}
-
-// --------------------
-// DRAGON / SPIDER
-// --------------------
-const DRAGON_HOURS = [4, 12, 20];
-const DRAGON_DURATION_HOURS = 2;
-
-function getDragonStatus() {
-  return getEventStatus(DRAGON_HOURS, DRAGON_DURATION_HOURS);
-}
-
-function buildDragonPayload() {
-  const status = getDragonStatus();
-
-  const embed = createEventEmbed({
-    title: "Dragon/Spider",
-    liveTitle: "Dragon/Spider is OPEN!!",
-    activeEmoji: "🐉",
-    inactiveEmoji: "🕷️",
-    activeColor: Colors.Green,
-    inactiveColor: Colors.DarkGreen,
-    scheduleText: "🕓 4:00 AM\n🕛 12:00 PM\n🕗 8:00 PM",
-    durationHours: DRAGON_DURATION_HOURS,
-    status,
-    hypeLine: "🔥 Head to Dragon/Spider now!",
-    openLabel: "Opens",
-    closeLabel: "Closes"
-  });
-
-  return {
-    content: "",
-    embeds: [embed],
-    allowedMentions: { parse: [] }
-  };
-}
-
-async function updateDragon() {
-  dragonMessageId = await postOrUpdate(dragonMessageId, buildDragonPayload());
-}
-
-async function startDragonEvent() {
-  await updateDragon();
-  await sendTemporaryAlert(
-    "@everyone 🐉🕷️ **Dragon/Spider is now OPEN!!**",
-    buildDragonPayload().embeds
-  );
-}
-
-async function endDragonEvent() {
-  await updateDragon();
+async function syncAll(force = false) {
+  await syncCrimson(force);
+  await syncDragon(force);
 }
 
 // --------------------
 // NEXT EVENT HELPER
 // --------------------
 function getNextUpcomingEvent() {
-  const crimson = getCrimsonStatus();
-  const dragon = getDragonStatus();
+  const crimson = getEventStatus(
+    EVENTS.crimson.hours,
+    EVENTS.crimson.durationHours
+  );
+  const dragon = getEventStatus(
+    EVENTS.dragon.hours,
+    EVENTS.dragon.durationHours
+  );
+
   const candidates = [];
 
   if (crimson) {
     candidates.push({
       name: crimson.isActive ? "Crimson Moon 🌕" : "Crimson Moon 🌙",
       time: crimson.isActive ? crimson.end : crimson.start,
-      label: crimson.isActive ? "ends" : "starts"
+      label: crimson.isActive ? "ends" : "starts",
     });
   }
 
@@ -492,7 +509,7 @@ function getNextUpcomingEvent() {
     candidates.push({
       name: "Dragon/Spider 🐉🕷️",
       time: dragon.isActive ? dragon.end : dragon.start,
-      label: dragon.isActive ? "ends" : "starts"
+      label: dragon.isActive ? "ends" : "starts",
     });
   }
 
@@ -509,108 +526,20 @@ client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
   try {
-    await updateCrimson();
-    await updateDragon();
+    await syncAll(true);
     console.log("Timers posted successfully.");
   } catch (err) {
-    console.error("Initial posting failed:", err);
+    console.error("Initial sync failed:", err);
   }
 
-  // Crimson Moon
-  cron.schedule("0 1 * * *", async () => {
+  // Every minute:
+  // - updates embeds only if event state changed
+  // - sends catch-up alert if service woke up during a live window
+  cron.schedule("* * * * *", async () => {
     try {
-      await startCrimsonEvent();
+      await syncAll(false);
     } catch (err) {
-      console.error("Crimson 1 AM update failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  cron.schedule("0 9 * * *", async () => {
-    try {
-      await startCrimsonEvent();
-    } catch (err) {
-      console.error("Crimson 9 AM update failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  cron.schedule("0 17 * * *", async () => {
-    try {
-      await startCrimsonEvent();
-    } catch (err) {
-      console.error("Crimson 5 PM update failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  cron.schedule("0 2 * * *", async () => {
-    try {
-      await endCrimsonEvent();
-    } catch (err) {
-      console.error("Crimson 2 AM refresh failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  cron.schedule("0 10 * * *", async () => {
-    try {
-      await endCrimsonEvent();
-    } catch (err) {
-      console.error("Crimson 10 AM refresh failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  cron.schedule("0 18 * * *", async () => {
-    try {
-      await endCrimsonEvent();
-    } catch (err) {
-      console.error("Crimson 6 PM refresh failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  // Dragon / Spider
-  cron.schedule("0 4 * * *", async () => {
-    try {
-      await startDragonEvent();
-    } catch (err) {
-      console.error("Dragon 4 AM update failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  cron.schedule("0 12 * * *", async () => {
-    try {
-      await startDragonEvent();
-    } catch (err) {
-      console.error("Dragon 12 PM update failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  cron.schedule("0 20 * * *", async () => {
-    try {
-      await startDragonEvent();
-    } catch (err) {
-      console.error("Dragon 8 PM update failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  cron.schedule("0 6 * * *", async () => {
-    try {
-      await endDragonEvent();
-    } catch (err) {
-      console.error("Dragon 6 AM refresh failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  cron.schedule("0 14 * * *", async () => {
-    try {
-      await endDragonEvent();
-    } catch (err) {
-      console.error("Dragon 2 PM refresh failed:", err);
-    }
-  }, { timezone: TIME_ZONE });
-
-  cron.schedule("0 22 * * *", async () => {
-    try {
-      await endDragonEvent();
-    } catch (err) {
-      console.error("Dragon 10 PM refresh failed:", err);
+      console.error("Minute sync failed:", err);
     }
   }, { timezone: TIME_ZONE });
 });
@@ -623,27 +552,26 @@ client.on("messageCreate", async (message) => {
 
   const cmd = message.content.toLowerCase().trim();
 
-  if (cmd === "!pingall") {
-    const crimsonEmbed = buildCrimsonPayload().embeds[0];
-    const dragonEmbed = buildDragonPayload().embeds[0];
-
-    await message.channel.send({
-      content: "@everyone 🚨 **Event update!**",
-      embeds: [crimsonEmbed, dragonEmbed],
-      allowedMentions: { parse: ["everyone"] }
-    });
-    return;
-  }
-
   if (cmd === "!refresh") {
     try {
-      await updateCrimson();
-      await updateDragon();
+      await syncAll(true);
       await message.reply("✅ Timers refreshed.");
     } catch (err) {
       console.error("Manual refresh failed:", err);
       await message.reply("⚠️ Refresh failed.");
     }
+    return;
+  }
+
+  if (cmd === "!crimson") {
+    const { payload } = buildEventPayload(EVENTS.crimson);
+    await message.reply({ embeds: payload.embeds });
+    return;
+  }
+
+  if (cmd === "!dragon") {
+    const { payload } = buildEventPayload(EVENTS.dragon);
+    await message.reply({ embeds: payload.embeds });
     return;
   }
 
@@ -657,9 +585,22 @@ client.on("messageCreate", async (message) => {
 
     const unix = toUnix(nextEvent.time);
 
-    await message.reply(
-      `⏳ **Next Event: ${nextEvent.name}**\n${nextEvent.label}: <t:${unix}:R> | <t:${unix}:F>\nServer timezone: ${TIME_ZONE}`
-    );
+    const embed = new EmbedBuilder()
+      .setTitle("⏳ Next Event")
+      .setColor(Colors.Blurple)
+      .addFields(
+        { name: "Event", value: nextEvent.name, inline: true },
+        { name: "Status", value: nextEvent.label, inline: true },
+        { name: "Time", value: `<t:${unix}:R>\n<t:${unix}:F>`, inline: false },
+        {
+          name: "Server Time",
+          value: `${formatTorontoLabel(nextEvent.time)} (${TIME_ZONE})`,
+          inline: false,
+        }
+      )
+      .setTimestamp();
+
+    await message.reply({ embeds: [embed] });
   }
 });
 
