@@ -1,17 +1,36 @@
 require("dotenv").config();
 
-const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+console.log("DISCORD_TOKEN exists:", !!process.env.DISCORD_TOKEN);
+console.log("CHANNEL_ID exists:", !!process.env.CHANNEL_ID);
+
+if (!process.env.DISCORD_TOKEN) {
+  throw new Error("Missing DISCORD_TOKEN in environment variables");
+}
+
+if (!process.env.CHANNEL_ID) {
+  throw new Error("Missing CHANNEL_ID in environment variables");
+}
+
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+} = require("discord.js");
 const { DateTime } = require("luxon");
 const fs = require("fs");
 const path = require("path");
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
-});
-
 const TOKEN = process.env.DISCORD_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const TIMEZONE = "America/Toronto";
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
 
 // Clan War settings
 const CLAN_WAR_START_ANCHOR = DateTime.fromISO("2026-04-18T20:00:00", {
@@ -36,12 +55,12 @@ const EVENT_SCHEDULES = {
   Spider: {
     icon: "🕷️",
     hours: [4, 12, 20],
-    durationHours: 1,
+    durationHours: 2,
   },
   Dragon: {
     icon: "🐉",
     hours: [4, 12, 20],
-    durationHours: 1,
+    durationHours: 2,
   },
 };
 
@@ -263,6 +282,11 @@ function buildEventReminderEmbed(event, minutesBefore) {
         inline: false,
       },
       {
+        name: "Duration",
+        value: `${Math.round(event.end.diff(event.start, "hours").hours)} hour(s)`,
+        inline: false,
+      },
+      {
         name: "Server Timezone",
         value: TIMEZONE,
         inline: false,
@@ -284,6 +308,11 @@ function buildEventStartedEmbed(event) {
       {
         name: "Ends",
         value: `${discordTimestamp(event.end)}`,
+        inline: false,
+      },
+      {
+        name: "Duration",
+        value: `${Math.round(event.end.diff(event.start, "hours").hours)} hour(s)`,
         inline: false,
       },
       {
@@ -334,7 +363,7 @@ function buildStatusEmbed(now, clanWar, upcomingEvents) {
         .slice(0, 8)
         .map(
           (event) =>
-            `${event.icon} **${event.name}** — ${discordTimestamp(event.start)} (${discordRelative(event.start)})`
+            `${event.icon} **${event.name}** — ${discordTimestamp(event.start)} to ${discordTimestamp(event.end)}`
         )
         .join("\n"),
       inline: false,
@@ -356,6 +385,20 @@ async function sendEmbed(channel, embed) {
   } catch (error) {
     console.error("Failed to send embed:", error);
   }
+}
+
+async function postTimerStatus(channel) {
+  const now = DateTime.now().setZone(TIMEZONE);
+  const clanWar = getActiveClanWarWindow(now);
+
+  let upcomingEvents = [];
+  if (clanWar.active) {
+    upcomingEvents = getAllEventsForWindow(clanWar.start, clanWar.end).filter(
+      (event) => event.start > now
+    );
+  }
+
+  await sendEmbed(channel, buildStatusEmbed(now, clanWar, upcomingEvents));
 }
 
 async function runChecks() {
@@ -444,19 +487,9 @@ async function runChecks() {
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  const now = DateTime.now().setZone(TIMEZONE);
-  const clanWar = getActiveClanWarWindow(now);
-
-  let upcomingEvents = [];
-  if (clanWar.active) {
-    upcomingEvents = getAllEventsForWindow(clanWar.start, clanWar.end).filter(
-      (event) => event.start > now
-    );
-  }
-
   const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
   if (channel) {
-    await sendEmbed(channel, buildStatusEmbed(now, clanWar, upcomingEvents));
+    await postTimerStatus(channel);
   }
 
   await runChecks();
@@ -470,4 +503,15 @@ client.once("ready", async () => {
   }, CHECK_INTERVAL_MS);
 });
 
-client.login(TOKEN);
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+
+  if (message.content === "!timer") {
+    await postTimerStatus(message.channel);
+  }
+});
+
+client.login(TOKEN).catch((err) => {
+  console.error("Login failed:", err);
+  process.exit(1);
+});
