@@ -1,607 +1,473 @@
-const express = require("express");
-const {
-  Client,
-  GatewayIntentBits,
-  EmbedBuilder,
-  Colors,
-} = require("discord.js");
-const cron = require("node-cron");
+require("dotenv").config();
 
-const app = express();
+const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const { DateTime } = require("luxon");
+const fs = require("fs");
+const path = require("path");
 
-const TOKEN = process.env.TOKEN;
-const CHANNEL_ID = "1480284500494647538";
-const TIME_ZONE = "America/Toronto";
-const PORT = process.env.PORT || 3000;
-const ALERT_DELETE_MS = 60 * 1000;
-
-// --------------------
-// KEEP-ALIVE SERVER
-// --------------------
-app.get("/", (req, res) => {
-  res.send("CW Timer bot is alive!");
-});
-
-app.listen(PORT, () => {
-  console.log(`Keep-alive server running on port ${PORT}`);
-});
-
-// --------------------
-// DISCORD BOT
-// --------------------
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
+  intents: [GatewayIntentBits.Guilds],
 });
 
-// --------------------
-// IN-MEMORY STATE
-// --------------------
-const state = {
-  crimsonMessageId: null,
-  dragonMessageId: null,
-  crimsonLastRenderKey: null,
-  dragonLastRenderKey: null,
-  crimsonLastAlertKey: null,
-  dragonLastAlertKey: null,
-};
+const TOKEN = process.env.DISCORD_TOKEN;
+const CHANNEL_ID = process.env.CHANNEL_ID;
+const TIMEZONE = "America/Toronto";
 
-// --------------------
-// EVENT CONFIG
-// --------------------
-const EVENTS = {
-  crimson: {
-    key: "crimson",
-    title: "Crimson Moon",
-    liveTitle: "Crimson Moon is LIVE!!",
-    activeEmoji: "🌕",
-    inactiveEmoji: "🌙",
-    activeColor: Colors.Gold,
-    inactiveColor: Colors.DarkGold,
+// Clan War settings
+const CLAN_WAR_START_ANCHOR = DateTime.fromISO("2026-04-18T20:00:00", {
+  zone: TIMEZONE,
+});
+const CLAN_WAR_DURATION_DAYS = 7;
+const CLAN_WAR_CYCLE_DAYS = 14;
+
+// Bot check interval
+const CHECK_INTERVAL_MS = 30 * 1000;
+
+// File to store sent reminders so restarts do not resend them
+const SENT_FILE = path.join(__dirname, "sent-reminders.json");
+
+// Event schedules in Toronto time
+const EVENT_SCHEDULES = {
+  "Crimson Moon": {
+    icon: "🌙",
     hours: [1, 9, 17],
     durationHours: 1,
-    scheduleText: "🌑 1:00 AM\n🕘 9:00 AM\n🕔 5:00 PM",
-    openLabel: "Starts",
-    closeLabel: "Ends",
-    liveLine: "🔥 The moon is shining — get in now!",
-    alertText: "@everyone 🌕 **Crimson Moon is LIVE!!**",
   },
-  dragon: {
-    key: "dragon",
-    title: "Dragon/Spider",
-    liveTitle: "Dragon/Spider is OPEN!!",
-    activeEmoji: "🐉",
-    inactiveEmoji: "🕷️",
-    activeColor: Colors.Green,
-    inactiveColor: Colors.DarkGreen,
+  Spider: {
+    icon: "🕷️",
     hours: [4, 12, 20],
-    durationHours: 2,
-    scheduleText: "🕓 4:00 AM\n🕛 12:00 PM\n🕗 8:00 PM",
-    openLabel: "Opens",
-    closeLabel: "Closes",
-    liveLine: "🔥 Head to Dragon/Spider now!",
-    alertText: "@everyone 🐉🕷️ **Dragon/Spider is now OPEN!!**",
+    durationHours: 1,
+  },
+  Dragon: {
+    icon: "🐉",
+    hours: [4, 12, 20],
+    durationHours: 1,
   },
 };
 
-// --------------------
-// TIMEZONE HELPERS
-// --------------------
-function getZonedParts(date = new Date(), timeZone = TIME_ZONE) {
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  });
+function loadSentReminders() {
+  try {
+    if (!fs.existsSync(SENT_FILE)) return {};
+    return JSON.parse(fs.readFileSync(SENT_FILE, "utf8"));
+  } catch (error) {
+    console.error("Failed to load sent reminders:", error);
+    return {};
+  }
+}
 
-  const parts = formatter.formatToParts(date);
-  const out = {};
+let sentReminders = loadSentReminders();
 
-  for (const part of parts) {
-    if (part.type !== "literal") {
-      out[part.type] = Number(part.value);
+function saveSentReminders() {
+  try {
+    fs.writeFileSync(SENT_FILE, JSON.stringify(sentReminders, null, 2));
+  } catch (error) {
+    console.error("Failed to save sent reminders:", error);
+  }
+}
+
+function alreadySent(key) {
+  return Boolean(sentReminders[key]);
+}
+
+function markSent(key) {
+  sentReminders[key] = new Date().toISOString();
+  saveSentReminders();
+}
+
+function cleanupOldReminderKeys() {
+  const now = Date.now();
+  const maxAgeMs = 60 * 24 * 60 * 60 * 1000; // 60 days
+  let changed = false;
+
+  for (const [key, timestamp] of Object.entries(sentReminders)) {
+    const parsed = new Date(timestamp).getTime();
+    if (!Number.isFinite(parsed) || now - parsed > maxAgeMs) {
+      delete sentReminders[key];
+      changed = true;
     }
   }
 
-  return {
-    year: out.year,
-    month: out.month,
-    day: out.day,
-    hour: out.hour,
-    minute: out.minute,
-    second: out.second,
-  };
+  if (changed) {
+    saveSentReminders();
+  }
 }
 
-function addDaysToYMD(year, month, day, daysToAdd) {
-  const d = new Date(Date.UTC(year, month - 1, day));
-  d.setUTCDate(d.getUTCDate() + daysToAdd);
-
-  return {
-    year: d.getUTCFullYear(),
-    month: d.getUTCMonth() + 1,
-    day: d.getUTCDate(),
-  };
+function discordTimestamp(dt) {
+  return `<t:${Math.floor(dt.toSeconds())}:F>`;
 }
 
-function makeZonedDate(
-  year,
-  month,
-  day,
-  hour = 0,
-  minute = 0,
-  second = 0,
-  timeZone = TIME_ZONE
-) {
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
+function discordRelative(dt) {
+  return `<t:${Math.floor(dt.toSeconds())}:R>`;
+}
+
+function isWithinTriggerWindow(now, target, windowSeconds = 45) {
+  const diffSeconds = Math.abs(now.diff(target, "seconds").seconds);
+  return diffSeconds <= windowSeconds;
+}
+
+function getCurrentOrNextClanWarWindow(now) {
+  if (now < CLAN_WAR_START_ANCHOR) {
+    return {
+      start: CLAN_WAR_START_ANCHOR,
+      end: CLAN_WAR_START_ANCHOR.plus({ days: CLAN_WAR_DURATION_DAYS }),
+    };
+  }
+
+  const diffDays = now.diff(CLAN_WAR_START_ANCHOR, "days").days;
+  const cycleIndex = Math.floor(diffDays / CLAN_WAR_CYCLE_DAYS);
+
+  let start = CLAN_WAR_START_ANCHOR.plus({
+    days: cycleIndex * CLAN_WAR_CYCLE_DAYS,
   });
+  let end = start.plus({ days: CLAN_WAR_DURATION_DAYS });
 
-  let guess = Date.UTC(year, month - 1, day, hour, minute, second);
+  if (now >= end) {
+    start = start.plus({ days: CLAN_WAR_CYCLE_DAYS });
+    end = start.plus({ days: CLAN_WAR_DURATION_DAYS });
+  }
 
-  for (let i = 0; i < 4; i++) {
-    const parts = formatter.formatToParts(new Date(guess));
-    const current = {};
+  return { start, end };
+}
 
-    for (const part of parts) {
-      if (part.type !== "literal") {
-        current[part.type] = Number(part.value);
+function getActiveClanWarWindow(now) {
+  const { start, end } = getCurrentOrNextClanWarWindow(now);
+
+  if (now >= start && now < end) {
+    return { active: true, start, end };
+  }
+
+  return { active: false, start, end };
+}
+
+function getEventsForWindow(windowStart, windowEnd, eventName, config) {
+  const events = [];
+  let cursor = windowStart.startOf("day");
+
+  while (cursor < windowEnd) {
+    for (const hour of config.hours) {
+      const start = cursor.set({
+        hour,
+        minute: 0,
+        second: 0,
+        millisecond: 0,
+      });
+      const end = start.plus({ hours: config.durationHours });
+
+      if (start >= windowStart && start < windowEnd) {
+        events.push({
+          key: `${eventName.toLowerCase().replace(/\s+/g, "-")}-${start.toISO()}`,
+          name: eventName,
+          icon: config.icon,
+          start,
+          end,
+        });
       }
     }
 
-    const renderedAsUTC = Date.UTC(
-      current.year,
-      current.month - 1,
-      current.day,
-      current.hour,
-      current.minute,
-      current.second
-    );
-
-    const targetAsUTC = Date.UTC(year, month - 1, day, hour, minute, second);
-    guess += targetAsUTC - renderedAsUTC;
+    cursor = cursor.plus({ days: 1 });
   }
 
-  return new Date(guess);
+  return events;
 }
 
-function toUnix(date) {
-  return Math.floor(date.getTime() / 1000);
-}
+function getAllEventsForWindow(windowStart, windowEnd) {
+  const allEvents = [];
 
-function formatTorontoLabel(date) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: TIME_ZONE,
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-  }).format(date);
-}
-
-function formatDuration(hours) {
-  return hours === 1 ? "1 hour" : `${hours} hours`;
-}
-
-// --------------------
-// EVENT WINDOW LOGIC
-// --------------------
-function buildWindows(hours, durationHours) {
-  const now = new Date();
-  const torontoToday = getZonedParts(now, TIME_ZONE);
-  const windows = [];
-
-  for (let dayOffset = -1; dayOffset <= 2; dayOffset++) {
-    const ymd = addDaysToYMD(
-      torontoToday.year,
-      torontoToday.month,
-      torontoToday.day,
-      dayOffset
-    );
-
-    for (const hour of hours) {
-      const start = makeZonedDate(
-        ymd.year,
-        ymd.month,
-        ymd.day,
-        hour,
-        0,
-        0,
-        TIME_ZONE
-      );
-
-      const end = new Date(start.getTime() + durationHours * 60 * 60 * 1000);
-      windows.push({ start, end });
-    }
+  for (const [eventName, config] of Object.entries(EVENT_SCHEDULES)) {
+    allEvents.push(...getEventsForWindow(windowStart, windowEnd, eventName, config));
   }
 
-  windows.sort((a, b) => a.start - b.start);
-  return windows;
+  return allEvents.sort((a, b) => a.start.toMillis() - b.start.toMillis());
 }
 
-function getEventStatus(hours, durationHours) {
-  const now = new Date();
-  const windows = buildWindows(hours, durationHours);
-
-  for (const window of windows) {
-    if (now >= window.start && now < window.end) {
-      return {
-        isActive: true,
-        start: window.start,
-        end: window.end,
-      };
-    }
-  }
-
-  for (const window of windows) {
-    if (window.start > now) {
-      return {
-        isActive: false,
-        start: window.start,
-        end: window.end,
-      };
-    }
-  }
-
-  return null;
-}
-
-function getWindowKey(status) {
-  if (!status) return null;
-  return `${toUnix(status.start)}-${toUnix(status.end)}`;
-}
-
-// --------------------
-// EMBED HELPERS
-// --------------------
-function progressBar(start, end, length = 12) {
-  const now = Date.now();
-  const total = end.getTime() - start.getTime();
-  const elapsed = Math.max(0, Math.min(now - start.getTime(), total));
-  const filled = total > 0 ? Math.round((elapsed / total) * length) : 0;
-
-  return "🟩".repeat(filled) + "⬜".repeat(length - filled);
-}
-
-function createEventEmbed(config, status) {
-  if (!status) {
-    return new EmbedBuilder()
-      .setTitle(config.title)
-      .setDescription("⚠️ Could not calculate the next event window.")
-      .setColor(Colors.Red)
-      .setFooter({ text: `Server timezone: ${TIME_ZONE}` })
-      .setTimestamp();
-  }
-
-  if (status.isActive) {
-    return new EmbedBuilder()
-      .setTitle(`${config.activeEmoji} ${config.liveTitle}`)
-      .setDescription(config.liveLine)
-      .setColor(config.activeColor)
-      .addFields(
-        {
-          name: "Status",
-          value: "🟢 **LIVE NOW**",
-          inline: true,
-        },
-        {
-          name: config.closeLabel,
-          value: `<t:${toUnix(status.end)}:R>\n<t:${toUnix(status.end)}:F>`,
-          inline: true,
-        },
-        {
-          name: "Progress",
-          value: progressBar(status.start, status.end),
-          inline: false,
-        },
-        {
-          name: "Server Schedule (Toronto)",
-          value: config.scheduleText,
-          inline: false,
-        },
-        {
-          name: "Duration",
-          value: formatDuration(config.durationHours),
-          inline: true,
-        },
-        {
-          name: "Server Timezone",
-          value: TIME_ZONE,
-          inline: true,
-        }
-      )
-      .setFooter({ text: "Discord timestamps auto-convert for each viewer." })
-      .setTimestamp();
-  }
-
+function buildClanWarStartEmbed(start, end) {
   return new EmbedBuilder()
-    .setTitle(`${config.inactiveEmoji} ${config.title}`)
-    .setColor(config.inactiveColor)
+    .setTitle("⚔️ Clan War Started")
+    .setDescription("Clan War is now active for this week.")
     .addFields(
       {
-        name: "Status",
-        value: "🕒 **Upcoming**",
-        inline: true,
-      },
-      {
-        name: config.openLabel,
-        value: `<t:${toUnix(status.start)}:R>\n<t:${toUnix(status.start)}:F>`,
-        inline: true,
-      },
-      {
-        name: config.closeLabel,
-        value: `<t:${toUnix(status.end)}:F>`,
-        inline: true,
-      },
-      {
-        name: "Server Schedule (Toronto)",
-        value: config.scheduleText,
+        name: "Starts",
+        value: `${discordTimestamp(start)}\n${discordRelative(start)}`,
         inline: false,
       },
       {
-        name: "Duration",
-        value: formatDuration(config.durationHours),
-        inline: true,
+        name: "Ends",
+        value: `${discordTimestamp(end)}\n${discordRelative(end)}`,
+        inline: false,
       },
       {
         name: "Server Timezone",
-        value: TIME_ZONE,
-        inline: true,
+        value: TIMEZONE,
+        inline: false,
       }
     )
-    .setFooter({ text: "Discord timestamps auto-convert for each viewer." })
     .setTimestamp();
 }
 
-function buildEventPayload(config) {
-  const status = getEventStatus(config.hours, config.durationHours);
-  const embed = createEventEmbed(config, status);
-
-  return {
-    status,
-    payload: {
-      content: "",
-      embeds: [embed],
-      allowedMentions: { parse: [] },
-    },
-  };
+function buildClanWarEndingSoonEmbed(end) {
+  return new EmbedBuilder()
+    .setTitle("⏳ Clan War Ending Soon")
+    .setDescription("Clan War ends in 1 hour.")
+    .addFields(
+      {
+        name: "Ends",
+        value: `${discordTimestamp(end)}\n${discordRelative(end)}`,
+        inline: false,
+      },
+      {
+        name: "Server Timezone",
+        value: TIMEZONE,
+        inline: false,
+      }
+    )
+    .setTimestamp();
 }
 
-function buildRenderKey(config, status) {
-  if (!status) return `${config.key}:none`;
-
-  return JSON.stringify({
-    active: status.isActive,
-    start: toUnix(status.start),
-    end: toUnix(status.end),
-  });
+function buildClanWarEndedEmbed(end, nextStart) {
+  return new EmbedBuilder()
+    .setTitle("🏁 Clan War Ended")
+    .setDescription("Clan War has ended for this cycle.")
+    .addFields(
+      {
+        name: "Ended",
+        value: `${discordTimestamp(end)}`,
+        inline: false,
+      },
+      {
+        name: "Next Clan War Starts",
+        value: `${discordTimestamp(nextStart)}\n${discordRelative(nextStart)}`,
+        inline: false,
+      },
+      {
+        name: "Server Timezone",
+        value: TIMEZONE,
+        inline: false,
+      }
+    )
+    .setTimestamp();
 }
 
-// --------------------
-// DISCORD HELPERS
-// --------------------
-async function getChannel() {
-  const channel = await client.channels.fetch(CHANNEL_ID);
-  if (!channel) {
-    throw new Error("Channel not found. Check CHANNEL_ID.");
+function buildEventReminderEmbed(event, minutesBefore) {
+  return new EmbedBuilder()
+    .setTitle(`${event.icon} ${event.name}`)
+    .setDescription(`${event.name} starts in ${minutesBefore} minutes.`)
+    .addFields(
+      {
+        name: "Starts",
+        value: `${discordTimestamp(event.start)}\n${discordRelative(event.start)}`,
+        inline: false,
+      },
+      {
+        name: "Ends",
+        value: `${discordTimestamp(event.end)}`,
+        inline: false,
+      },
+      {
+        name: "Server Timezone",
+        value: TIMEZONE,
+        inline: false,
+      }
+    )
+    .setTimestamp();
+}
+
+function buildEventStartedEmbed(event) {
+  return new EmbedBuilder()
+    .setTitle(`${event.icon} ${event.name} Started`)
+    .setDescription(`${event.name} is live now.`)
+    .addFields(
+      {
+        name: "Started",
+        value: `${discordTimestamp(event.start)}\n${discordRelative(event.start)}`,
+        inline: false,
+      },
+      {
+        name: "Ends",
+        value: `${discordTimestamp(event.end)}`,
+        inline: false,
+      },
+      {
+        name: "Server Timezone",
+        value: TIMEZONE,
+        inline: false,
+      }
+    )
+    .setTimestamp();
+}
+
+function buildStatusEmbed(now, clanWar, upcomingEvents) {
+  const embed = new EmbedBuilder()
+    .setTitle("📋 Clan War Timer Status")
+    .addFields(
+      {
+        name: "Current Time",
+        value: `${discordTimestamp(now)}\n${discordRelative(now)}`,
+        inline: false,
+      },
+      {
+        name: "Clan War Status",
+        value: clanWar.active ? "🟢 Active" : "🔴 Inactive",
+        inline: false,
+      },
+      {
+        name: "Current / Next Clan War Start",
+        value: `${discordTimestamp(clanWar.start)}\n${discordRelative(clanWar.start)}`,
+        inline: false,
+      },
+      {
+        name: "Current / Next Clan War End",
+        value: `${discordTimestamp(clanWar.end)}\n${discordRelative(clanWar.end)}`,
+        inline: false,
+      },
+      {
+        name: "Server Timezone",
+        value: TIMEZONE,
+        inline: false,
+      }
+    )
+    .setTimestamp();
+
+  if (upcomingEvents.length > 0) {
+    embed.addFields({
+      name: "Upcoming Events",
+      value: upcomingEvents
+        .slice(0, 8)
+        .map(
+          (event) =>
+            `${event.icon} **${event.name}** — ${discordTimestamp(event.start)} (${discordRelative(event.start)})`
+        )
+        .join("\n"),
+      inline: false,
+    });
+  } else {
+    embed.addFields({
+      name: "Upcoming Events",
+      value: "No active event reminders right now.",
+      inline: false,
+    });
   }
-  return channel;
+
+  return embed;
 }
 
-async function postOrUpdate(messageId, payload) {
-  const channel = await getChannel();
-
-  if (!messageId) {
-    const msg = await channel.send(payload);
-    return msg.id;
-  }
-
+async function sendEmbed(channel, embed) {
   try {
-    const msg = await channel.messages.fetch(messageId);
-    await msg.edit(payload);
-    return messageId;
-  } catch {
-    const newMsg = await channel.send(payload);
-    return newMsg.id;
+    await channel.send({ embeds: [embed] });
+  } catch (error) {
+    console.error("Failed to send embed:", error);
   }
 }
 
-async function sendTemporaryAlert(content) {
-  const channel = await getChannel();
+async function runChecks() {
+  const now = DateTime.now().setZone(TIMEZONE);
+  const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
 
-  const msg = await channel.send({
-    content,
-    allowedMentions: { parse: ["everyone"] },
-  });
+  if (!channel) {
+    console.error("Could not find channel. Check CHANNEL_ID.");
+    return;
+  }
 
-  setTimeout(async () => {
-    try {
-      await msg.delete();
-    } catch (err) {
-      console.error("Failed to delete alert message:", err);
+  cleanupOldReminderKeys();
+
+  const clanWar = getActiveClanWarWindow(now);
+
+  const clanWarStartKey = `clanwar-start-${clanWar.start.toISO()}`;
+  if (
+    isWithinTriggerWindow(now, clanWar.start) &&
+    !alreadySent(clanWarStartKey)
+  ) {
+    await sendEmbed(channel, buildClanWarStartEmbed(clanWar.start, clanWar.end));
+    markSent(clanWarStartKey);
+  }
+
+  const clanWarEndingSoonTime = clanWar.end.minus({ hours: 1 });
+  const clanWarEndingSoonKey = `clanwar-endingsoon-${clanWar.end.toISO()}`;
+  if (
+    clanWar.active &&
+    isWithinTriggerWindow(now, clanWarEndingSoonTime) &&
+    !alreadySent(clanWarEndingSoonKey)
+  ) {
+    await sendEmbed(channel, buildClanWarEndingSoonEmbed(clanWar.end));
+    markSent(clanWarEndingSoonKey);
+  }
+
+  const clanWarEndedKey = `clanwar-ended-${clanWar.end.toISO()}`;
+  if (
+    isWithinTriggerWindow(now, clanWar.end) &&
+    !alreadySent(clanWarEndedKey)
+  ) {
+    const nextStart = clanWar.end.plus({ days: 7 });
+    await sendEmbed(channel, buildClanWarEndedEmbed(clanWar.end, nextStart));
+    markSent(clanWarEndedKey);
+  }
+
+  if (!clanWar.active) {
+    return;
+  }
+
+  const events = getAllEventsForWindow(clanWar.start, clanWar.end);
+
+  for (const event of events) {
+    const oneHourBefore = event.start.minus({ hours: 1 });
+    const fifteenMinutesBefore = event.start.minus({ minutes: 15 });
+
+    const oneHourKey = `${event.key}-1h`;
+    const fifteenMinuteKey = `${event.key}-15m`;
+    const startKey = `${event.key}-start`;
+
+    if (
+      isWithinTriggerWindow(now, oneHourBefore) &&
+      !alreadySent(oneHourKey)
+    ) {
+      await sendEmbed(channel, buildEventReminderEmbed(event, 60));
+      markSent(oneHourKey);
     }
-  }, ALERT_DELETE_MS);
-}
 
-// --------------------
-// SYNC LOGIC
-// --------------------
-async function syncCrimson(force = false) {
-  const config = EVENTS.crimson;
-  const { status, payload } = buildEventPayload(config);
-  const renderKey = buildRenderKey(config, status);
-  const windowKey = getWindowKey(status);
+    if (
+      isWithinTriggerWindow(now, fifteenMinutesBefore) &&
+      !alreadySent(fifteenMinuteKey)
+    ) {
+      await sendEmbed(channel, buildEventReminderEmbed(event, 15));
+      markSent(fifteenMinuteKey);
+    }
 
-  if (force || state.crimsonLastRenderKey !== renderKey) {
-    state.crimsonMessageId = await postOrUpdate(state.crimsonMessageId, payload);
-    state.crimsonLastRenderKey = renderKey;
-  }
-
-  if (status && status.isActive && windowKey && state.crimsonLastAlertKey !== windowKey) {
-    await sendTemporaryAlert(config.alertText);
-    state.crimsonLastAlertKey = windowKey;
+    if (
+      isWithinTriggerWindow(now, event.start) &&
+      !alreadySent(startKey)
+    ) {
+      await sendEmbed(channel, buildEventStartedEmbed(event));
+      markSent(startKey);
+    }
   }
 }
 
-async function syncDragon(force = false) {
-  const config = EVENTS.dragon;
-  const { status, payload } = buildEventPayload(config);
-  const renderKey = buildRenderKey(config, status);
-  const windowKey = getWindowKey(status);
-
-  if (force || state.dragonLastRenderKey !== renderKey) {
-    state.dragonMessageId = await postOrUpdate(state.dragonMessageId, payload);
-    state.dragonLastRenderKey = renderKey;
-  }
-
-  if (status && status.isActive && windowKey && state.dragonLastAlertKey !== windowKey) {
-    await sendTemporaryAlert(config.alertText);
-    state.dragonLastAlertKey = windowKey;
-  }
-}
-
-async function syncAll(force = false) {
-  await syncCrimson(force);
-  await syncDragon(force);
-}
-
-// --------------------
-// NEXT EVENT HELPER
-// --------------------
-function getNextUpcomingEvent() {
-  const crimson = getEventStatus(
-    EVENTS.crimson.hours,
-    EVENTS.crimson.durationHours
-  );
-  const dragon = getEventStatus(
-    EVENTS.dragon.hours,
-    EVENTS.dragon.durationHours
-  );
-
-  const candidates = [];
-
-  if (crimson) {
-    candidates.push({
-      name: crimson.isActive ? "Crimson Moon 🌕" : "Crimson Moon 🌙",
-      time: crimson.isActive ? crimson.end : crimson.start,
-      label: crimson.isActive ? "ends" : "starts",
-    });
-  }
-
-  if (dragon) {
-    candidates.push({
-      name: "Dragon/Spider 🐉🕷️",
-      time: dragon.isActive ? dragon.end : dragon.start,
-      label: dragon.isActive ? "ends" : "starts",
-    });
-  }
-
-  if (candidates.length === 0) return null;
-
-  candidates.sort((a, b) => a.time - b.time);
-  return candidates[0];
-}
-
-// --------------------
-// STARTUP
-// --------------------
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  try {
-    await syncAll(true);
-    console.log("Timers posted successfully.");
-  } catch (err) {
-    console.error("Initial sync failed:", err);
+  const now = DateTime.now().setZone(TIMEZONE);
+  const clanWar = getActiveClanWarWindow(now);
+
+  let upcomingEvents = [];
+  if (clanWar.active) {
+    upcomingEvents = getAllEventsForWindow(clanWar.start, clanWar.end).filter(
+      (event) => event.start > now
+    );
   }
 
-  // Every minute:
-  // - updates embeds only if event state changed
-  // - sends catch-up alert if service woke up during a live window
-  cron.schedule("* * * * *", async () => {
+  const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
+  if (channel) {
+    await sendEmbed(channel, buildStatusEmbed(now, clanWar, upcomingEvents));
+  }
+
+  await runChecks();
+
+  setInterval(async () => {
     try {
-      await syncAll(false);
-    } catch (err) {
-      console.error("Minute sync failed:", err);
+      await runChecks();
+    } catch (error) {
+      console.error("Error in scheduled check:", error);
     }
-  }, { timezone: TIME_ZONE });
-});
-
-// --------------------
-// COMMANDS
-// --------------------
-client.on("messageCreate", async (message) => {
-  if (message.author.bot) return;
-
-  const cmd = message.content.toLowerCase().trim();
-
-  if (cmd === "!refresh") {
-    try {
-      await syncAll(true);
-      await message.reply("✅ Timers refreshed.");
-    } catch (err) {
-      console.error("Manual refresh failed:", err);
-      await message.reply("⚠️ Refresh failed.");
-    }
-    return;
-  }
-
-  if (cmd === "!crimson") {
-    const { payload } = buildEventPayload(EVENTS.crimson);
-    await message.reply({ embeds: payload.embeds });
-    return;
-  }
-
-  if (cmd === "!dragon") {
-    const { payload } = buildEventPayload(EVENTS.dragon);
-    await message.reply({ embeds: payload.embeds });
-    return;
-  }
-
-  if (cmd === "!next") {
-    const nextEvent = getNextUpcomingEvent();
-
-    if (!nextEvent) {
-      await message.reply("⚠️ Could not determine the next event.");
-      return;
-    }
-
-    const unix = toUnix(nextEvent.time);
-
-    const embed = new EmbedBuilder()
-      .setTitle("⏳ Next Event")
-      .setColor(Colors.Blurple)
-      .addFields(
-        { name: "Event", value: nextEvent.name, inline: true },
-        { name: "Status", value: nextEvent.label, inline: true },
-        { name: "Time", value: `<t:${unix}:R>\n<t:${unix}:F>`, inline: false },
-        {
-          name: "Server Time",
-          value: `${formatTorontoLabel(nextEvent.time)} (${TIME_ZONE})`,
-          inline: false,
-        }
-      )
-      .setTimestamp();
-
-    await message.reply({ embeds: [embed] });
-  }
+  }, CHECK_INTERVAL_MS);
 });
 
 client.login(TOKEN);
