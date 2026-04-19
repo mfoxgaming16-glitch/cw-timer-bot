@@ -51,7 +51,6 @@ const CLAN_WAR_START_ANCHOR = DateTime.fromISO("2026-04-18T20:00:00", {
 const CLAN_WAR_DURATION_DAYS = 7;
 const CLAN_WAR_CYCLE_DAYS = 14;
 const CHECK_INTERVAL_MS = 30 * 1000;
-
 const SENT_FILE = path.join(__dirname, "sent-reminders.json");
 
 /* -----------------------------
@@ -76,7 +75,7 @@ const EVENT_SCHEDULES = {
 };
 
 /* -----------------------------
-   Discord client
+   Discord Client Setup
 ------------------------------ */
 const client = new Client({
   intents: [
@@ -87,7 +86,7 @@ const client = new Client({
 });
 
 /* -----------------------------
-   Reminder file helpers
+   Reminder storage
 ------------------------------ */
 function loadSentReminders() {
   try {
