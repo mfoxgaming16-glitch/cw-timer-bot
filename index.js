@@ -1,3 +1,4 @@
+console.log("INDEX JS NEW VERSION LOADED");
 require("dotenv").config();
 
 const express = require("express");
@@ -616,7 +617,7 @@ client.on("messageCreate", async (message) => {
 /* -----------------------------
    Login
 ------------------------------ */
-console.log("About to log in to Discord...");
+console.log("REACHED DISCORD LOGIN LINE");
 
 client.login(TOKEN).catch((err) => {
   console.error("Login failed:", err);
