@@ -1,14 +1,11 @@
 {
-  "name": "clan-war-timer-bot",
+  "name": "cw-timer-bot",
   "version": "1.0.0",
-  "description": "Discord bot for every-other-week clan war reminders",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.21.0",
-    "dotenv": "^16.4.5",
-    "luxon": "^3.5.0"
+    "discord.js": "^14.15.3"
   }
 }
