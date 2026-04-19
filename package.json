@@ -1,6 +1,7 @@
 {
   "name": "cw-timer-bot",
   "version": "1.0.0",
+  "description": "Discord bot for clan war timers",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
