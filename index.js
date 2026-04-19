@@ -10,11 +10,11 @@ const {
   EmbedBuilder,
 } = require("discord.js");
 
-// --------------------
-// Render keep-alive web server
-// --------------------
+/* -----------------------------
+   Render keep-alive web server
+------------------------------ */
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.get("/", (req, res) => {
   res.send("Bot is alive");
@@ -24,9 +24,9 @@ app.listen(PORT, () => {
   console.log(`Web server running on port ${PORT}`);
 });
 
-// --------------------
-// Env checks
-// --------------------
+/* -----------------------------
+   Environment checks
+------------------------------ */
 console.log("DISCORD_TOKEN exists:", !!process.env.DISCORD_TOKEN);
 console.log("CHANNEL_ID exists:", !!process.env.CHANNEL_ID);
 
@@ -38,9 +38,9 @@ if (!process.env.CHANNEL_ID) {
   throw new Error("Missing CHANNEL_ID in environment variables");
 }
 
-// --------------------
-// Constants
-// --------------------
+/* -----------------------------
+   Constants
+------------------------------ */
 const TOKEN = process.env.DISCORD_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const TIMEZONE = "America/Toronto";
@@ -50,13 +50,13 @@ const CLAN_WAR_START_ANCHOR = DateTime.fromISO("2026-04-18T20:00:00", {
 });
 const CLAN_WAR_DURATION_DAYS = 7;
 const CLAN_WAR_CYCLE_DAYS = 14;
-
 const CHECK_INTERVAL_MS = 30 * 1000;
+
 const SENT_FILE = path.join(__dirname, "sent-reminders.json");
 
-// --------------------
-// Event schedules
-// --------------------
+/* -----------------------------
+   Event schedules
+------------------------------ */
 const EVENT_SCHEDULES = {
   "Crimson Moon": {
     icon: "🌙",
@@ -75,9 +75,9 @@ const EVENT_SCHEDULES = {
   },
 };
 
-// --------------------
-// Discord client
-// --------------------
+/* -----------------------------
+   Discord client
+------------------------------ */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -86,9 +86,9 @@ const client = new Client({
   ],
 });
 
-// --------------------
-// Reminder storage
-// --------------------
+/* -----------------------------
+   Reminder file helpers
+------------------------------ */
 function loadSentReminders() {
   try {
     if (!fs.existsSync(SENT_FILE)) return {};
@@ -136,9 +136,9 @@ function cleanupOldReminderKeys() {
   }
 }
 
-// --------------------
-// Time helpers
-// --------------------
+/* -----------------------------
+   Time helpers
+------------------------------ */
 function discordTimestamp(dt) {
   return `<t:${Math.floor(dt.toSeconds())}:F>`;
 }
@@ -152,9 +152,9 @@ function isWithinTriggerWindow(now, target, windowSeconds = 45) {
   return diffSeconds <= windowSeconds;
 }
 
-// --------------------
-// Clan War helpers
-// --------------------
+/* -----------------------------
+   Clan War helpers
+------------------------------ */
 function getCurrentOrNextClanWarWindow(now) {
   if (now < CLAN_WAR_START_ANCHOR) {
     return {
@@ -189,9 +189,9 @@ function getActiveClanWarWindow(now) {
   return { active: false, start, end };
 }
 
-// --------------------
-// Event helpers
-// --------------------
+/* -----------------------------
+   Event helpers
+------------------------------ */
 function getEventsForWindow(windowStart, windowEnd, eventName, config) {
   const events = [];
   let cursor = windowStart.startOf("day");
@@ -240,9 +240,9 @@ function getDurationLabel(event) {
   return `${Math.round(hours)} hour(s)`;
 }
 
-// --------------------
-// Embed builders
-// --------------------
+/* -----------------------------
+   Embed builders
+------------------------------ */
 function buildClanWarStartEmbed(start, end) {
   return new EmbedBuilder()
     .setTitle("⚔️ Clan War Started")
@@ -423,160 +423,202 @@ function buildStatusEmbed(now, clanWar, upcomingEvents) {
   return embed;
 }
 
-// --------------------
-// Message helpers
-// --------------------
+/* -----------------------------
+   Send helpers
+------------------------------ */
 async function sendEmbed(channel, embed) {
   try {
     await channel.send({ embeds: [embed] });
+    console.log("Embed sent successfully");
   } catch (error) {
     console.error("Failed to send embed:", error);
   }
 }
 
 async function postTimerStatus(channel) {
-  const now = DateTime.now().setZone(TIMEZONE);
-  const clanWar = getActiveClanWarWindow(now);
+  try {
+    console.log("postTimerStatus started");
 
-  let upcomingEvents = [];
-  if (clanWar.active) {
-    upcomingEvents = getAllEventsForWindow(clanWar.start, clanWar.end).filter(
-      (event) => event.start > now
-    );
+    const now = DateTime.now().setZone(TIMEZONE);
+    const clanWar = getActiveClanWarWindow(now);
+
+    let upcomingEvents = [];
+    if (clanWar.active) {
+      upcomingEvents = getAllEventsForWindow(clanWar.start, clanWar.end).filter(
+        (event) => event.start > now
+      );
+    }
+
+    console.log("About to send status embed");
+    await sendEmbed(channel, buildStatusEmbed(now, clanWar, upcomingEvents));
+    console.log("Status embed sent");
+  } catch (error) {
+    console.error("postTimerStatus failed:", error);
   }
-
-  await sendEmbed(channel, buildStatusEmbed(now, clanWar, upcomingEvents));
 }
 
-// --------------------
-// Scheduled checks
-// --------------------
+/* -----------------------------
+   Scheduled checks
+------------------------------ */
 async function runChecks() {
-  const now = DateTime.now().setZone(TIMEZONE);
-  const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
+  try {
+    console.log("runChecks started");
 
-  if (!channel) {
-    console.error("Could not find channel. Check CHANNEL_ID.");
-    return;
-  }
+    const now = DateTime.now().setZone(TIMEZONE);
+    const channel = await client.channels.fetch(CHANNEL_ID).catch((err) => {
+      console.error("Channel fetch failed:", err);
+      return null;
+    });
 
-  cleanupOldReminderKeys();
-
-  const clanWar = getActiveClanWarWindow(now);
-
-  const clanWarStartKey = `clanwar-start-${clanWar.start.toISO()}`;
-  if (
-    isWithinTriggerWindow(now, clanWar.start) &&
-    !alreadySent(clanWarStartKey)
-  ) {
-    await sendEmbed(channel, buildClanWarStartEmbed(clanWar.start, clanWar.end));
-    markSent(clanWarStartKey);
-  }
-
-  const clanWarEndingSoonTime = clanWar.end.minus({ hours: 1 });
-  const clanWarEndingSoonKey = `clanwar-endingsoon-${clanWar.end.toISO()}`;
-  if (
-    clanWar.active &&
-    isWithinTriggerWindow(now, clanWarEndingSoonTime) &&
-    !alreadySent(clanWarEndingSoonKey)
-  ) {
-    await sendEmbed(channel, buildClanWarEndingSoonEmbed(clanWar.end));
-    markSent(clanWarEndingSoonKey);
-  }
-
-  const clanWarEndedKey = `clanwar-ended-${clanWar.end.toISO()}`;
-  if (
-    isWithinTriggerWindow(now, clanWar.end) &&
-    !alreadySent(clanWarEndedKey)
-  ) {
-    const nextStart = clanWar.end.plus({ days: 7 });
-    await sendEmbed(channel, buildClanWarEndedEmbed(clanWar.end, nextStart));
-    markSent(clanWarEndedKey);
-  }
-
-  if (!clanWar.active) {
-    return;
-  }
-
-  const events = getAllEventsForWindow(clanWar.start, clanWar.end);
-
-  for (const event of events) {
-    const oneHourBefore = event.start.minus({ hours: 1 });
-    const fifteenMinutesBefore = event.start.minus({ minutes: 15 });
-
-    const oneHourKey = `${event.key}-1h`;
-    const fifteenMinuteKey = `${event.key}-15m`;
-    const startKey = `${event.key}-start`;
-
-    if (
-      isWithinTriggerWindow(now, oneHourBefore) &&
-      !alreadySent(oneHourKey)
-    ) {
-      await sendEmbed(channel, buildEventReminderEmbed(event, 60));
-      markSent(oneHourKey);
+    if (!channel) {
+      console.error("Could not find channel. Check CHANNEL_ID.");
+      return;
     }
 
+    console.log("Channel fetched successfully:", channel.id);
+
+    cleanupOldReminderKeys();
+
+    const clanWar = getActiveClanWarWindow(now);
+    console.log("Clan war active:", clanWar.active);
+
+    const clanWarStartKey = `clanwar-start-${clanWar.start.toISO()}`;
     if (
-      isWithinTriggerWindow(now, fifteenMinutesBefore) &&
-      !alreadySent(fifteenMinuteKey)
+      isWithinTriggerWindow(now, clanWar.start) &&
+      !alreadySent(clanWarStartKey)
     ) {
-      await sendEmbed(channel, buildEventReminderEmbed(event, 15));
-      markSent(fifteenMinuteKey);
+      console.log("Sending clan war start embed");
+      await sendEmbed(channel, buildClanWarStartEmbed(clanWar.start, clanWar.end));
+      markSent(clanWarStartKey);
     }
 
+    const clanWarEndingSoonTime = clanWar.end.minus({ hours: 1 });
+    const clanWarEndingSoonKey = `clanwar-endingsoon-${clanWar.end.toISO()}`;
     if (
-      isWithinTriggerWindow(now, event.start) &&
-      !alreadySent(startKey)
+      clanWar.active &&
+      isWithinTriggerWindow(now, clanWarEndingSoonTime) &&
+      !alreadySent(clanWarEndingSoonKey)
     ) {
-      await sendEmbed(channel, buildEventStartedEmbed(event));
-      markSent(startKey);
+      console.log("Sending clan war ending soon embed");
+      await sendEmbed(channel, buildClanWarEndingSoonEmbed(clanWar.end));
+      markSent(clanWarEndingSoonKey);
     }
+
+    const clanWarEndedKey = `clanwar-ended-${clanWar.end.toISO()}`;
+    if (
+      isWithinTriggerWindow(now, clanWar.end) &&
+      !alreadySent(clanWarEndedKey)
+    ) {
+      console.log("Sending clan war ended embed");
+      const nextStart = clanWar.end.plus({ days: 7 });
+      await sendEmbed(channel, buildClanWarEndedEmbed(clanWar.end, nextStart));
+      markSent(clanWarEndedKey);
+    }
+
+    if (!clanWar.active) {
+      console.log("Clan war inactive, skipping event reminders");
+      return;
+    }
+
+    const events = getAllEventsForWindow(clanWar.start, clanWar.end);
+    console.log("Events found in active window:", events.length);
+
+    for (const event of events) {
+      const oneHourBefore = event.start.minus({ hours: 1 });
+      const fifteenMinutesBefore = event.start.minus({ minutes: 15 });
+
+      const oneHourKey = `${event.key}-1h`;
+      const fifteenMinuteKey = `${event.key}-15m`;
+      const startKey = `${event.key}-start`;
+
+      if (
+        isWithinTriggerWindow(now, oneHourBefore) &&
+        !alreadySent(oneHourKey)
+      ) {
+        console.log(`Sending 1h reminder for ${event.name}`);
+        await sendEmbed(channel, buildEventReminderEmbed(event, 60));
+        markSent(oneHourKey);
+      }
+
+      if (
+        isWithinTriggerWindow(now, fifteenMinutesBefore) &&
+        !alreadySent(fifteenMinuteKey)
+      ) {
+        console.log(`Sending 15m reminder for ${event.name}`);
+        await sendEmbed(channel, buildEventReminderEmbed(event, 15));
+        markSent(fifteenMinuteKey);
+      }
+
+      if (
+        isWithinTriggerWindow(now, event.start) &&
+        !alreadySent(startKey)
+      ) {
+        console.log(`Sending start reminder for ${event.name}`);
+        await sendEmbed(channel, buildEventStartedEmbed(event));
+        markSent(startKey);
+      }
+    }
+
+    console.log("runChecks completed");
+  } catch (error) {
+    console.error("runChecks failed:", error);
   }
 }
 
-// --------------------
-// Ready event
-// --------------------
+/* -----------------------------
+   Discord events
+------------------------------ */
 client.once("ready", async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  try {
+    console.log(`Logged in as ${client.user.tag}`);
 
-  const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
-  if (channel) {
+    const channel = await client.channels.fetch(CHANNEL_ID).catch((err) => {
+      console.error("Ready event channel fetch failed:", err);
+      return null;
+    });
+
+    if (!channel) {
+      console.error("No channel found during ready event");
+      return;
+    }
+
+    console.log("Ready event fetched channel:", channel.id);
+
     await postTimerStatus(channel);
+    await runChecks();
+
+    setInterval(async () => {
+      try {
+        await runChecks();
+      } catch (error) {
+        console.error("Interval runChecks failed:", error);
+      }
+    }, CHECK_INTERVAL_MS);
+  } catch (error) {
+    console.error("Ready handler failed:", error);
   }
-
-  await runChecks();
-
-  setInterval(async () => {
-    try {
-      await runChecks();
-    } catch (error) {
-      console.error("Error in scheduled check:", error);
-    }
-  }, CHECK_INTERVAL_MS);
 });
 
-// --------------------
-// Command listener
-// --------------------
 client.on("messageCreate", async (message) => {
-  if (message.author.bot) return;
+  try {
+    if (message.author.bot) return;
 
-  console.log("Message received:", message.content);
+    console.log("Message received:", message.content);
 
-  if (message.content === "!timer") {
-    console.log("!timer command triggered");
-    try {
+    if (message.content === "!timer") {
+      console.log("!timer command triggered");
       await postTimerStatus(message.channel);
-    } catch (error) {
-      console.error("Failed to post timer:", error);
     }
+  } catch (error) {
+    console.error("messageCreate failed:", error);
   }
 });
 
-// --------------------
-// Login
-// --------------------
+/* -----------------------------
+   Login
+------------------------------ */
+console.log("About to log in to Discord...");
+
 client.login(TOKEN).catch((err) => {
   console.error("Login failed:", err);
   process.exit(1);
