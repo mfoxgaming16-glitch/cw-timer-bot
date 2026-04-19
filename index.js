@@ -38,6 +38,11 @@ client.on("messageCreate", (message) => {
 
 console.log("REACHED DISCORD LOGIN LINE");
 
-client.login(process.env.DISCORD_TOKEN).catch((err) => {
-  console.error("❌ Login failed:", err);
-});
+client.login(process.env.DISCORD_TOKEN)
+  .then(() => {
+    console.log("✅ LOGIN SUCCESS CALLED");
+  })
+  .catch((err) => {
+    console.error("❌ LOGIN ERROR:");
+    console.error(err);
+  });
