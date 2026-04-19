@@ -9,7 +9,6 @@ const PORT = process.env.PORT || 10000;
 console.log("Token exists:", !!token);
 console.log("Token length:", token.length);
 
-// Tiny web server for Render
 const app = express();
 
 app.get("/", (req, res) => {
@@ -20,7 +19,6 @@ app.listen(PORT, () => {
   console.log(`Web server running on port ${PORT}`);
 });
 
-// Discord bot
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
@@ -37,23 +35,43 @@ client.on("warn", (msg) => {
   console.warn("Client warn:", msg);
 });
 
-if (!token) {
-  console.error("NO TOKEN FOUND");
-  process.exit(1);
-}
+client.on("shardReady", (id) => {
+  console.log(`Shard ${id} ready`);
+});
+
+client.on("shardDisconnect", (event, id) => {
+  console.log(`Shard ${id} disconnected with code ${event.code}`);
+});
+
+client.on("shardError", (err, id) => {
+  console.error(`Shard ${id} error:`, err);
+});
+
+client.on("shardReconnecting", (id) => {
+  console.log(`Shard ${id} reconnecting`);
+});
+
 client.on("debug", (msg) => {
+  const text = msg.toLowerCase();
   if (
-    msg.toLowerCase().includes("gateway") ||
-    msg.toLowerCase().includes("session")
+    text.includes("gateway") ||
+    text.includes("identify") ||
+    text.includes("heartbeat") ||
+    text.includes("session") ||
+    text.includes("shard")
   ) {
     console.log("DEBUG:", msg);
   }
 });
 
-console.log("Attempting login...");
+if (!token) {
+  console.error("NO TOKEN FOUND");
+  process.exit(1);
+}
 
 (async () => {
   try {
+    console.log("Attempting login...");
     await client.login(token);
     console.log("Login promise resolved");
   } catch (err) {
