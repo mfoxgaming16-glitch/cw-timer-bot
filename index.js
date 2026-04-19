@@ -41,13 +41,23 @@ if (!token) {
   console.error("NO TOKEN FOUND");
   process.exit(1);
 }
+client.on("debug", (msg) => {
+  if (
+    msg.toLowerCase().includes("gateway") ||
+    msg.toLowerCase().includes("session")
+  ) {
+    console.log("DEBUG:", msg);
+  }
+});
 
 console.log("Attempting login...");
 
-client.login(token)
-  .then(() => {
+(async () => {
+  try {
+    await client.login(token);
     console.log("Login promise resolved");
-  })
-  .catch((err) => {
-    console.error("Login failed:", err);
-  });
+  } catch (err) {
+    console.error("LOGIN ERROR CAUGHT:");
+    console.error(err);
+  }
+})();
