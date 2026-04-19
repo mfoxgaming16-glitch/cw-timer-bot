@@ -1,5 +1,32 @@
 require("dotenv").config();
 
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+const { DateTime } = require("luxon");
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+} = require("discord.js");
+
+// --------------------
+// Render keep-alive web server
+// --------------------
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.send("Bot is alive");
+});
+
+app.listen(PORT, () => {
+  console.log(`Web server running on port ${PORT}`);
+});
+
+// --------------------
+// Env checks
+// --------------------
 console.log("DISCORD_TOKEN exists:", !!process.env.DISCORD_TOKEN);
 console.log("CHANNEL_ID exists:", !!process.env.CHANNEL_ID);
 
@@ -11,51 +38,25 @@ if (!process.env.CHANNEL_ID) {
   throw new Error("Missing CHANNEL_ID in environment variables");
 }
 
-const {
-  Client,
-  GatewayIntentBits,
-  EmbedBuilder,
-} = require("discord.js");
-const { DateTime } = require("luxon");
-const fs = require("fs");
-const path = require("path");
-const express = require("express");
-const app = express();
-
-app.get("/", (req, res) => {
-  res.send("Bot is alive");
-});
-
-app.listen(3000, () => {
-  console.log("Web server running on port 3000");
-});
-
+// --------------------
+// Constants
+// --------------------
 const TOKEN = process.env.DISCORD_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const TIMEZONE = "America/Toronto";
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-});
-
-// Clan War settings
 const CLAN_WAR_START_ANCHOR = DateTime.fromISO("2026-04-18T20:00:00", {
   zone: TIMEZONE,
 });
 const CLAN_WAR_DURATION_DAYS = 7;
 const CLAN_WAR_CYCLE_DAYS = 14;
 
-// Bot check interval
 const CHECK_INTERVAL_MS = 30 * 1000;
-
-// File to store sent reminders so restarts do not resend them
 const SENT_FILE = path.join(__dirname, "sent-reminders.json");
 
-// Event schedules in Toronto time
+// --------------------
+// Event schedules
+// --------------------
 const EVENT_SCHEDULES = {
   "Crimson Moon": {
     icon: "🌙",
@@ -74,6 +75,20 @@ const EVENT_SCHEDULES = {
   },
 };
 
+// --------------------
+// Discord client
+// --------------------
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
+
+// --------------------
+// Reminder storage
+// --------------------
 function loadSentReminders() {
   try {
     if (!fs.existsSync(SENT_FILE)) return {};
@@ -105,7 +120,7 @@ function markSent(key) {
 
 function cleanupOldReminderKeys() {
   const now = Date.now();
-  const maxAgeMs = 60 * 24 * 60 * 60 * 1000; // 60 days
+  const maxAgeMs = 60 * 24 * 60 * 60 * 1000;
   let changed = false;
 
   for (const [key, timestamp] of Object.entries(sentReminders)) {
@@ -121,6 +136,9 @@ function cleanupOldReminderKeys() {
   }
 }
 
+// --------------------
+// Time helpers
+// --------------------
 function discordTimestamp(dt) {
   return `<t:${Math.floor(dt.toSeconds())}:F>`;
 }
@@ -134,6 +152,9 @@ function isWithinTriggerWindow(now, target, windowSeconds = 45) {
   return diffSeconds <= windowSeconds;
 }
 
+// --------------------
+// Clan War helpers
+// --------------------
 function getCurrentOrNextClanWarWindow(now) {
   if (now < CLAN_WAR_START_ANCHOR) {
     return {
@@ -168,6 +189,9 @@ function getActiveClanWarWindow(now) {
   return { active: false, start, end };
 }
 
+// --------------------
+// Event helpers
+// --------------------
 function getEventsForWindow(windowStart, windowEnd, eventName, config) {
   const events = [];
   let cursor = windowStart.startOf("day");
@@ -203,12 +227,22 @@ function getAllEventsForWindow(windowStart, windowEnd) {
   const allEvents = [];
 
   for (const [eventName, config] of Object.entries(EVENT_SCHEDULES)) {
-    allEvents.push(...getEventsForWindow(windowStart, windowEnd, eventName, config));
+    allEvents.push(
+      ...getEventsForWindow(windowStart, windowEnd, eventName, config)
+    );
   }
 
   return allEvents.sort((a, b) => a.start.toMillis() - b.start.toMillis());
 }
 
+function getDurationLabel(event) {
+  const hours = event.end.diff(event.start, "hours").hours;
+  return `${Math.round(hours)} hour(s)`;
+}
+
+// --------------------
+// Embed builders
+// --------------------
 function buildClanWarStartEmbed(start, end) {
   return new EmbedBuilder()
     .setTitle("⚔️ Clan War Started")
@@ -293,7 +327,7 @@ function buildEventReminderEmbed(event, minutesBefore) {
       },
       {
         name: "Duration",
-        value: `${Math.round(event.end.diff(event.start, "hours").hours)} hour(s)`,
+        value: getDurationLabel(event),
         inline: false,
       },
       {
@@ -322,7 +356,7 @@ function buildEventStartedEmbed(event) {
       },
       {
         name: "Duration",
-        value: `${Math.round(event.end.diff(event.start, "hours").hours)} hour(s)`,
+        value: getDurationLabel(event),
         inline: false,
       },
       {
@@ -389,6 +423,9 @@ function buildStatusEmbed(now, clanWar, upcomingEvents) {
   return embed;
 }
 
+// --------------------
+// Message helpers
+// --------------------
 async function sendEmbed(channel, embed) {
   try {
     await channel.send({ embeds: [embed] });
@@ -411,6 +448,9 @@ async function postTimerStatus(channel) {
   await sendEmbed(channel, buildStatusEmbed(now, clanWar, upcomingEvents));
 }
 
+// --------------------
+// Scheduled checks
+// --------------------
 async function runChecks() {
   const now = DateTime.now().setZone(TIMEZONE);
   const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
@@ -494,6 +534,9 @@ async function runChecks() {
   }
 }
 
+// --------------------
+// Ready event
+// --------------------
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -513,14 +556,27 @@ client.once("ready", async () => {
   }, CHECK_INTERVAL_MS);
 });
 
+// --------------------
+// Command listener
+// --------------------
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
+  console.log("Message received:", message.content);
+
   if (message.content === "!timer") {
-    await postTimerStatus(message.channel);
+    console.log("!timer command triggered");
+    try {
+      await postTimerStatus(message.channel);
+    } catch (error) {
+      console.error("Failed to post timer:", error);
+    }
   }
 });
 
+// --------------------
+// Login
+// --------------------
 client.login(TOKEN).catch((err) => {
   console.error("Login failed:", err);
   process.exit(1);
